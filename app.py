@@ -1572,6 +1572,10 @@ def cleanup_thread():
         
         time.sleep(60)  # كل دقيقة
 
+# بدء الخيوط
+threading.Thread(target=matchmaking_thread, daemon=True).start()
+threading.Thread(target=cleanup_thread, daemon=True).start()
+
 @app.route('/server_status')
 def server_status():
     """حالة الخادم"""
@@ -1588,20 +1592,9 @@ def server_status():
         'server_time': datetime.now().isoformat()
     })
 
-# بدء الخيوط
-matchmaking_thread_instance = threading.Thread(target=matchmaking_thread, daemon=True)
-cleanup_thread_instance = threading.Thread(target=cleanup_thread, daemon=True)
-
-# بدء الخيوط فقط إذا لم تكن تعمل بالفعل
-if not matchmaking_thread_instance.is_alive():
-    matchmaking_thread_instance.start()
-
-if not cleanup_thread_instance.is_alive():
-    cleanup_thread_instance.start()
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    
+    print("=" * 60)
+    print("🎮 خادم لعبة XO - الإصدار النهائي")
     print("=" * 60)
     print("\n✅ المميزات:")
     print("   ✓ يعمل على عدة أجهزة على نفس الشبكة")
@@ -1610,14 +1603,14 @@ if __name__ == "__main__":
     print("   ✓ منع تداخل الأدوار (X لا يلعب دور O)")
     print("   ✓ واجهة مستخدم متطورة")
     print("\n🌐 معلومات الاتصال:")
-    print(f"   📍 http://localhost:{port}")
-    print("   📱 http://[عنوان IP جهازك]:" + str(port))
+    print("   📍 http://localhost:5000")
+    print("   📱 http://[عنوان IP جهازك]:5000")
     print("\n🔗 للاتصال من أجهزة أخرى:")
     print("   1. تأكد أن جميع الأجهزة على نفس الشبكة")
     print("   2. افتح المتصفح في الجهاز الآخر")
-    print("   3. اكتب: http://[IP-جهازك]:" + str(port))
+    print("   3. اكتب: http://[IP-جهازك]:5000")
     print("\n📊 للحصول على حالة الخادم:")
-    print("   http://[IP-جهازك]:" + str(port) + "/server_status")
+    print("   http://[IP-جهازك]:5000/server_status")
     print("=" * 60)
     
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
