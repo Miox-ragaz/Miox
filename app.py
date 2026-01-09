@@ -4,14 +4,38 @@ app = Flask(__name__)
 @app.route('/google620d181fa7a7ee21.html')
 def google_verification():
     return "google-site-verification: google620d181fa7a7ee21.html"
+@app.route('/robots.txt')
+def robots():
+    return """User-agent: *
+Allow: /
+Sitemap: https://mocat.onrender.com/sitemap.xml"""
+@app.route('/sitemap.xml')
+def sitemap():
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url>
+<loc>https://mocat.onrender.com/</loc>
+<lastmod>2024-01-20</lastmod>
+<changefreq>weekly</changefreq>
+<priority>1.0</priority>
+</url>
+</urlset>"""
 
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html dir="rtl" lang="ar">
 <head>
+    <!-- ضع هذه الأسطر في بداية <head> -->
+    <meta name="description" content="Mocat - تطبيق دردشة آمن وسريع مع تشفير كامل">
+    <meta name="keywords" content="Mocat, تطبيق دردشة, دردشة آمنة, تطبيق عربي">
+    <meta name="google-site-verification" content="620d181fa7a7ee21">
+    
+    <!-- باقي الـ meta tags -->
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Mocat - تطبيق الدردشة الآمن</title>
+    
+</head>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         /* الأساسيات */
