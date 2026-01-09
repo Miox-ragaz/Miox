@@ -16,6 +16,7 @@ HTML_TEMPLATE = '''
             margin: 0;
             padding: 0;
             box-sizing: border-box;
+            transition: all 0.3s ease;
         }
         
         body {
@@ -23,29 +24,18 @@ HTML_TEMPLATE = '''
             background: #0f172a;
             color: #f1f5f9;
             line-height: 1.6;
-            transition: background 0.3s, color 0.3s;
         }
         
         body.theme-white {
             background: #ffffff;
-            color: #000000;
+            color: #1f2937;
         }
         
-        body.theme-black {
-            background: #000000;
-            color: #ffffff;
-        }
-        
-        body.theme-blue {
-            background: #0c4a6e;
-            color: #e0f2fe;
-        }
-        
-        /* الهيدر مع الصورة */
+        /* الهيدر مع الصورة - أكثر شفافية */
         .header {
             height: 70vh;
-            background: linear-gradient(rgba(15, 23, 42, 0.8), rgba(15, 23, 42, 0.9)),
-                        url('https://images.unsplash.com/photo-1529156069898-49953e39b3ac?w=1600&q=80');
+            background: linear-gradient(rgba(15, 23, 42, 0.6), rgba(15, 23, 42, 0.7)),
+                        url('https://images.unsplash.com/photo-1529156069898-49953e39b3ac?w=1600&q=80&fit=crop&crop=faces');
             background-size: cover;
             background-position: center;
             display: flex;
@@ -53,23 +43,51 @@ HTML_TEMPLATE = '''
             justify-content: center;
             text-align: center;
             position: relative;
+            animation: fadeIn 1s ease-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        body.theme-white .header {
+            background: linear-gradient(rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.8)),
+                        url('https://images.unsplash.com/photo-1529156069898-49953e39b3ac?w=1600&q=80&fit=crop&crop=faces');
         }
         
         .header-content {
             max-width: 800px;
             padding: 2rem;
+            animation: slideUp 1s ease-out 0.3s both;
+        }
+        
+        @keyframes slideUp {
+            from { transform: translateY(30px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
         }
         
         .app-logo {
             font-size: 4rem;
             color: #60a5fa;
             margin-bottom: 1rem;
+            animation: bounce 2s infinite;
+        }
+        
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-10px); }
         }
         
         .app-title {
             font-size: 3rem;
             color: white;
             margin-bottom: 1rem;
+            animation: fadeIn 1.5s ease-out 0.5s both;
+        }
+        
+        body.theme-white .app-title {
+            color: #1f2937;
         }
         
         .app-tagline {
@@ -77,6 +95,11 @@ HTML_TEMPLATE = '''
             color: #cbd5e1;
             max-width: 600px;
             margin: 0 auto;
+            animation: fadeIn 1.5s ease-out 0.7s both;
+        }
+        
+        body.theme-white .app-tagline {
+            color: #4b5563;
         }
         
         /* التنقل */
@@ -90,18 +113,16 @@ HTML_TEMPLATE = '''
             top: 0;
             z-index: 100;
             backdrop-filter: blur(10px);
+            animation: slideDown 0.5s ease-out;
+        }
+        
+        @keyframes slideDown {
+            from { transform: translateY(-100%); }
+            to { transform: translateY(0); }
         }
         
         body.theme-white .nav {
             background: rgba(255, 255, 255, 0.95);
-        }
-        
-        body.theme-black .nav {
-            background: rgba(0, 0, 0, 0.95);
-        }
-        
-        body.theme-blue .nav {
-            background: rgba(12, 74, 110, 0.95);
         }
         
         .nav-btn {
@@ -118,17 +139,18 @@ HTML_TEMPLATE = '''
         }
         
         body.theme-white .nav-btn {
-            color: #374151;
+            color: #6b7280;
         }
         
         .nav-btn:hover {
             background: rgba(255, 255, 255, 0.1);
             color: white;
+            transform: translateY(-2px);
         }
         
         body.theme-white .nav-btn:hover {
-            background: rgba(0, 0, 0, 0.1);
-            color: #000000;
+            background: rgba(0, 0, 0, 0.05);
+            color: #1f2937;
         }
         
         /* المحتوى */
@@ -141,7 +163,22 @@ HTML_TEMPLATE = '''
         .section {
             padding: 4rem 0;
             border-bottom: 1px solid #334155;
+            opacity: 0;
+            transform: translateY(20px);
+            animation: fadeInUp 0.8s ease-out forwards;
         }
+        
+        @keyframes fadeInUp {
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        .section:nth-child(1) { animation-delay: 0.2s; }
+        .section:nth-child(2) { animation-delay: 0.4s; }
+        .section:nth-child(3) { animation-delay: 0.6s; }
+        .section:nth-child(4) { animation-delay: 0.8s; }
         
         body.theme-white .section {
             border-bottom: 1px solid #e5e7eb;
@@ -171,8 +208,17 @@ HTML_TEMPLATE = '''
             padding: 2rem;
             border-radius: 12px;
             border: 1px solid #334155;
-            transition: transform 0.3s;
+            opacity: 0;
+            transform: translateY(20px);
+            animation: fadeInUp 0.6s ease-out forwards;
         }
+        
+        .feature-card:nth-child(1) { animation-delay: 0.3s; }
+        .feature-card:nth-child(2) { animation-delay: 0.4s; }
+        .feature-card:nth-child(3) { animation-delay: 0.5s; }
+        .feature-card:nth-child(4) { animation-delay: 0.6s; }
+        .feature-card:nth-child(5) { animation-delay: 0.7s; }
+        .feature-card:nth-child(6) { animation-delay: 0.8s; }
         
         body.theme-white .feature-card {
             background: #f9fafb;
@@ -180,8 +226,9 @@ HTML_TEMPLATE = '''
         }
         
         .feature-card:hover {
-            transform: translateY(-5px);
+            transform: translateY(-5px) scale(1.02);
             border-color: #60a5fa;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
         }
         
         .feature-icon {
@@ -202,7 +249,13 @@ HTML_TEMPLATE = '''
             margin-bottom: 1rem;
             overflow: hidden;
             border: 1px solid #334155;
+            animation: fadeInUp 0.6s ease-out forwards;
         }
+        
+        .faq-item:nth-child(1) { animation-delay: 0.3s; }
+        .faq-item:nth-child(2) { animation-delay: 0.4s; }
+        .faq-item:nth-child(3) { animation-delay: 0.5s; }
+        .faq-item:nth-child(4) { animation-delay: 0.6s; }
         
         body.theme-white .faq-item {
             background: #f9fafb;
@@ -216,10 +269,19 @@ HTML_TEMPLATE = '''
             justify-content: space-between;
             align-items: center;
             background: #1e293b;
+            transition: all 0.3s ease;
         }
         
         body.theme-white .faq-question {
             background: #f9fafb;
+        }
+        
+        .faq-question:hover {
+            background: #334155;
+        }
+        
+        body.theme-white .faq-question:hover {
+            background: #e5e7eb;
         }
         
         .faq-answer {
@@ -227,6 +289,18 @@ HTML_TEMPLATE = '''
             border-top: 1px solid #334155;
             display: none;
             background: #0f172a;
+            animation: slideDownAnswer 0.3s ease-out;
+        }
+        
+        @keyframes slideDownAnswer {
+            from { 
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to { 
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
         
         body.theme-white .faq-answer {
@@ -234,7 +308,7 @@ HTML_TEMPLATE = '''
             background: #ffffff;
         }
         
-        /* المطورون */
+        /* المطورون - صورة جديدة لأشخاص مبسوطين */
         .developers-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -247,7 +321,12 @@ HTML_TEMPLATE = '''
             background: #1e293b;
             border-radius: 12px;
             border: 1px solid #334155;
+            animation: fadeInUp 0.6s ease-out forwards;
         }
+        
+        .developer-card:nth-child(1) { animation-delay: 0.3s; }
+        .developer-card:nth-child(2) { animation-delay: 0.4s; }
+        .developer-card:nth-child(3) { animation-delay: 0.5s; }
         
         body.theme-white .developer-card {
             background: #f9fafb;
@@ -272,6 +351,7 @@ HTML_TEMPLATE = '''
             z-index: 1000;
             align-items: center;
             justify-content: center;
+            animation: fadeIn 0.3s ease;
         }
         
         .settings-content {
@@ -283,6 +363,7 @@ HTML_TEMPLATE = '''
             max-height: 80vh;
             overflow-y: auto;
             border: 1px solid #334155;
+            animation: slideUp 0.3s ease;
         }
         
         body.theme-white .settings-content {
@@ -307,6 +388,81 @@ HTML_TEMPLATE = '''
             border: 1px solid #e5e7eb;
         }
         
+        /* أزرار التحديد - زرين فقط */
+        .theme-buttons {
+            display: flex;
+            gap: 1rem;
+            margin-top: 0.5rem;
+        }
+        
+        .theme-btn {
+            padding: 0.8rem 1.5rem;
+            border-radius: 8px;
+            cursor: pointer;
+            border: 2px solid transparent;
+            background: #1e293b;
+            color: white;
+            flex: 1;
+            text-align: center;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        
+        .theme-btn.active {
+            border-color: #60a5fa;
+            background: rgba(96, 165, 250, 0.2);
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(96, 165, 250, 0.3);
+        }
+        
+        body.theme-white .theme-btn {
+            background: #f3f4f6;
+            color: #1f2937;
+        }
+        
+        body.theme-white .theme-btn.active {
+            border-color: #1d4ed8;
+            background: rgba(29, 78, 216, 0.1);
+            box-shadow: 0 4px 12px rgba(29, 78, 216, 0.2);
+        }
+        
+        .lang-buttons {
+            display: flex;
+            gap: 1rem;
+            margin-top: 0.5rem;
+        }
+        
+        .lang-btn {
+            padding: 0.8rem 1.5rem;
+            border-radius: 8px;
+            cursor: pointer;
+            border: 2px solid transparent;
+            background: #1e293b;
+            color: white;
+            flex: 1;
+            text-align: center;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        
+        .lang-btn.active {
+            border-color: #60a5fa;
+            background: rgba(96, 165, 250, 0.2);
+            transform: scale(1.05);
+            box-shadow: 0 4px 12px rgba(96, 165, 250, 0.3);
+        }
+        
+        body.theme-white .lang-btn {
+            background: #f3f4f6;
+            color: #1f2937;
+        }
+        
+        body.theme-white .lang-btn.active {
+            border-color: #1d4ed8;
+            background: rgba(29, 78, 216, 0.1);
+            box-shadow: 0 4px 12px rgba(29, 78, 216, 0.2);
+        }
+        
         /* زر التحميل */
         .download-section {
             text-align: center;
@@ -314,6 +470,13 @@ HTML_TEMPLATE = '''
             background: linear-gradient(135deg, #1e40af, #3b82f6);
             border-radius: 20px;
             margin: 3rem 0;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+            100% { transform: scale(1); }
         }
         
         .download-btn {
@@ -329,10 +492,13 @@ HTML_TEMPLATE = '''
             gap: 10px;
             font-weight: bold;
             margin-top: 1rem;
+            transition: all 0.3s ease;
         }
         
         .download-btn:hover {
             background: #f8fafc;
+            transform: translateY(-3px) scale(1.05);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
         }
         
         /* التذييل */
@@ -342,6 +508,7 @@ HTML_TEMPLATE = '''
             color: #94a3b8;
             border-top: 1px solid #334155;
             margin-top: 4rem;
+            animation: fadeIn 1s ease-out 1s both;
         }
         
         body.theme-white footer {
@@ -375,11 +542,15 @@ HTML_TEMPLATE = '''
             .section {
                 padding: 3rem 0;
             }
+            
+            .theme-buttons, .lang-buttons {
+                flex-direction: column;
+            }
         }
     </style>
 </head>
 <body>
-    <!-- الهيدر مع الصورة -->
+    <!-- الهيدر مع الصورة الجديدة -->
     <header class="header">
         <div class="header-content">
             <div class="app-logo">
@@ -549,11 +720,11 @@ HTML_TEMPLATE = '''
                 
                 <div class="faq-item">
                     <div class="faq-question" onclick="toggleFAQ(3)">
-                        <span id="faq3Question">ما هي مسزات التطبيق؟</span>
+                        <span id="faq3Question">ما هي مميزات التطبيق؟</span>
                         <i class="fas fa-chevron-down"></i>
                     </div>
                     <div class="faq-answer" id="faq3Answer">
-                        <p id="faq3AnswerText">المسزات (الامتيازات) التي يطلبها التطبيق هي فقط ما يحتاجه للعمل: الوصول للشبكة لإرسال الرسائل، التخزين لحفظ المحادثات، والميكروفون للمكالمات الصوتية.</p>
+                        <p id="faq3AnswerText">تطبيق Mocat يوفر تشفير كامل، سرعة عالية، مجموعات ذكية، مشاركة وسائط، وضع ليلي، ودعم عربي كامل لتجربة دردشة آمنة وسلسة.</p>
                     </div>
                 </div>
                 
@@ -607,7 +778,7 @@ HTML_TEMPLATE = '''
                     <strong id="appNameLabel">اسم التطبيق:</strong> Mocat<br>
                     <strong id="versionLabel">الإصدار:</strong> 1.0.0<br>
                     <strong id="typeLabel">النوع:</strong> <span id="appType">تطبيق دردشة</span><br>
-                    <strong id="sizeLabel">الحجم:</strong> 15 ميجابايت
+                    <strong id="statusLabel">الحالة:</strong> <span id="appStatus">تحت التطوير</span>
                 </div>
             </div>
             
@@ -616,18 +787,12 @@ HTML_TEMPLATE = '''
                     <i class="fas fa-palette"></i> <span id="themeTitle">المظهر</span>
                 </h3>
                 <div class="setting-item">
-                    <div style="display: flex; gap: 1rem; margin-top: 0.5rem; flex-wrap: wrap;">
-                        <button onclick="changeTheme('dark-blue')" style="padding: 0.5rem 1rem; background: #1e293b; color: white; border: 1px solid #334155; border-radius: 6px; cursor: pointer;">
-                            أسود+أزرق داكن
+                    <div class="theme-buttons">
+                        <button id="themeDark" class="theme-btn active" onclick="changeTheme('dark')">
+                            داكن
                         </button>
-                        <button onclick="changeTheme('white')" style="padding: 0.5rem 1rem; background: #ffffff; color: #000000; border: 1px solid #d1d5db; border-radius: 6px; cursor: pointer;">
-                            أبيض
-                        </button>
-                        <button onclick="changeTheme('black')" style="padding: 0.5rem 1rem; background: #000000; color: white; border: none; border-radius: 6px; cursor: pointer;">
-                            أسود
-                        </button>
-                        <button onclick="changeTheme('blue')" style="padding: 0.5rem 1rem; background: #1e40af; color: white; border: none; border-radius: 6px; cursor: pointer;">
-                            أزرق
+                        <button id="themeWhite" class="theme-btn" onclick="changeTheme('white')">
+                            فاتح
                         </button>
                     </div>
                 </div>
@@ -638,11 +803,11 @@ HTML_TEMPLATE = '''
                     <i class="fas fa-language"></i> <span id="languageTitle">اللغة</span>
                 </h3>
                 <div class="setting-item">
-                    <div style="display: flex; gap: 1rem; margin-top: 0.5rem;">
-                        <button onclick="changeLanguage('ar')" style="padding: 0.5rem 1rem; background: #1e40af; color: white; border: none; border-radius: 6px; cursor: pointer;">
+                    <div class="lang-buttons">
+                        <button id="langAr" class="lang-btn active" onclick="changeLanguage('ar')">
                             العربية
                         </button>
-                        <button onclick="changeLanguage('en')" style="padding: 0.5rem 1rem; background: #1e293b; color: white; border: 1px solid #334155; border-radius: 6px; cursor: pointer;">
+                        <button id="langEn" class="lang-btn" onclick="changeLanguage('en')">
                             English
                         </button>
                     </div>
@@ -665,7 +830,7 @@ HTML_TEMPLATE = '''
     <script>
         // حالة التطبيق
         let currentLanguage = 'ar';
-        let currentTheme = 'dark-blue';
+        let currentTheme = 'dark';
         
         // نصوص عربية
         const arabicTexts = {
@@ -708,8 +873,8 @@ HTML_TEMPLATE = '''
             faq1AnswerText: "التطبيق يسمح لك بإنشاء حساب، إضافة أصدقاء، وإنشاء محادثات فردية أو جماعية. جميع الرسائل ترسل مشفرة وتظهر فوراً للمستقبل.",
             faq2Question: "هل المحادثات آمنة حقاً؟",
             faq2AnswerText: "نعم، نستخدم تشفير من طرف إلى طرف. هذا يعني أن الرسائل تتشفر على جهازك وتتشفر على جهاز المستقبل. لا يمكن قراءتها أثناء النقل.",
-            faq3Question: "ما هي مسزات التطبيق؟",
-            faq3AnswerText: "المسزات (الامتيازات) التي يطلبها التطبيق هي فقط ما يحتاجه للعمل: الوصول للشبكة لإرسال الرسائل، التخزين لحفظ المحادثات، والميكروفون للمكالمات الصوتية.",
+            faq3Question: "ما هي مميزات التطبيق؟",
+            faq3AnswerText: "تطبيق Mocat يوفر تشفير كامل، سرعة عالية، مجموعات ذكية، مشاركة وسائط، وضع ليلي، ودعم عربي كامل لتجربة دردشة آمنة وسلسة.",
             faq4Question: "هل يمكن اختراق التطبيق؟",
             faq4AnswerText: "النظام مبني على مبدأ الأمان أولاً. لا نخزن بيانات حساسة على سيرفرات مركزية. حتى لو تم اختراق السيرفر، لن تصل للمحادثات لأنها مشفرة.",
             downloadTitle: "جاهز للبدء؟",
@@ -723,7 +888,8 @@ HTML_TEMPLATE = '''
             versionLabel: "الإصدار:",
             typeLabel: "النوع:",
             appType: "تطبيق دردشة",
-            sizeLabel: "الحجم:",
+            statusLabel: "الحالة:",
+            appStatus: "تحت التطوير",
             themeTitle: "المظهر",
             languageTitle: "اللغة",
             aboutTitle: "حول التطبيق",
@@ -771,8 +937,8 @@ HTML_TEMPLATE = '''
             faq1AnswerText: "The app allows you to create an account, add friends, and create individual or group conversations. All messages are sent encrypted and appear immediately to the recipient.",
             faq2Question: "Are conversations really secure?",
             faq2AnswerText: "Yes, we use end-to-end encryption. This means messages are encrypted on your device and decrypted on the recipient's device. They cannot be read during transmission.",
-            faq3Question: "What are the app permissions?",
-            faq3AnswerText: "The permissions requested by the app are only what it needs to work: network access for sending messages, storage for saving conversations, and microphone for voice calls.",
+            faq3Question: "What are the app features?",
+            faq3AnswerText: "Mocat app provides full encryption, high speed, smart groups, media sharing, night mode, and full Arabic support for a secure and smooth chatting experience.",
             faq4Question: "Can the app be hacked?",
             faq4AnswerText: "The system is built on the principle of security first. We don't store sensitive data on central servers. Even if the server is hacked, conversations won't be accessed because they are encrypted.",
             downloadTitle: "Ready to start?",
@@ -786,7 +952,8 @@ HTML_TEMPLATE = '''
             versionLabel: "Version:",
             typeLabel: "Type:",
             appType: "Chat Application",
-            sizeLabel: "Size:",
+            statusLabel: "Status:",
+            appStatus: "Under Development",
             themeTitle: "Appearance",
             languageTitle: "Language",
             aboutTitle: "About",
@@ -823,26 +990,31 @@ HTML_TEMPLATE = '''
             if (answer.style.display === 'block') {
                 answer.style.display = 'none';
                 icon.className = 'fas fa-chevron-down';
+                answer.style.animation = 'slideUpAnswer 0.3s ease-out';
             } else {
                 answer.style.display = 'block';
                 icon.className = 'fas fa-chevron-up';
+                answer.style.animation = 'slideDownAnswer 0.3s ease-out';
             }
         }
         
         // تغيير المظهر
         function changeTheme(theme) {
             // إزالة كل الثيمات
-            document.body.classList.remove('theme-white', 'theme-black', 'theme-blue');
+            document.body.classList.remove('theme-white');
             
-            // تطبيق الثيم الجديد
+            // إزالة الكلاس النشط من جميع أزرار الثيمات
+            document.querySelectorAll('.theme-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // تطبيق الثيم الجديد وإضافة الكلاس النشط
             if (theme === 'white') {
                 document.body.classList.add('theme-white');
-            } else if (theme === 'black') {
-                document.body.classList.add('theme-black');
-            } else if (theme === 'blue') {
-                document.body.classList.add('theme-blue');
+                document.getElementById('themeWhite').classList.add('active');
+            } else {
+                document.getElementById('themeDark').classList.add('active');
             }
-            // 'dark-blue' هو الافتراضي (بدون كلاس إضافي)
             
             currentTheme = theme;
             
@@ -864,6 +1036,12 @@ HTML_TEMPLATE = '''
                 document.documentElement.lang = 'ar';
                 document.body.style.textAlign = 'right';
             }
+            
+            // تحديث حالة الأزرار النشطة
+            document.querySelectorAll('.lang-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            document.getElementById('lang' + (lang === 'en' ? 'En' : 'Ar')).classList.add('active');
             
             // تحديث النصوص
             updateTexts(lang);
@@ -900,8 +1078,8 @@ HTML_TEMPLATE = '''
             if (savedTheme) {
                 changeTheme(savedTheme);
             } else {
-                // الافتراضي: أسود+أزرق داكن
-                changeTheme('dark-blue');
+                // الافتراضي: داكن
+                changeTheme('dark');
             }
             
             // تطبيق اللغة
@@ -926,6 +1104,45 @@ HTML_TEMPLATE = '''
                     closeSettings();
                 }
             });
+            
+            // تفعيل الانيميشن عند التمرير
+            const sections = document.querySelectorAll('.section');
+            const featureCards = document.querySelectorAll('.feature-card');
+            const developerCards = document.querySelectorAll('.developer-card');
+            const faqItems = document.querySelectorAll('.faq-item');
+            
+            function checkScroll() {
+                sections.forEach(section => {
+                    const sectionTop = section.getBoundingClientRect().top;
+                    if (sectionTop < window.innerHeight - 100) {
+                        section.style.animationPlayState = 'running';
+                    }
+                });
+                
+                featureCards.forEach(card => {
+                    const cardTop = card.getBoundingClientRect().top;
+                    if (cardTop < window.innerHeight - 100) {
+                        card.style.animationPlayState = 'running';
+                    }
+                });
+                
+                developerCards.forEach(card => {
+                    const cardTop = card.getBoundingClientRect().top;
+                    if (cardTop < window.innerHeight - 100) {
+                        card.style.animationPlayState = 'running';
+                    }
+                });
+                
+                faqItems.forEach(item => {
+                    const itemTop = item.getBoundingClientRect().top;
+                    if (itemTop < window.innerHeight - 100) {
+                        item.style.animationPlayState = 'running';
+                    }
+                });
+            }
+            
+            window.addEventListener('scroll', checkScroll);
+            checkScroll(); // تشغيل فور التحميل
             
             console.log('موقع Mocat يعمل بنجاح');
         });
