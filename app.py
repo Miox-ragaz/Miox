@@ -20,7 +20,7 @@ HTML_TEMPLATE = '''
         
         body {
             font-family: system-ui, sans-serif;
-            background: #0f172a;
+            background: #0f172a; /* أسود+أزرق داكن افتراضي */
             color: #f1f5f9;
             line-height: 1.6;
         }
@@ -532,15 +532,18 @@ HTML_TEMPLATE = '''
                     <i class="fas fa-palette"></i> المظهر
                 </h3>
                 <div class="setting-item">
-                    <div style="display: flex; gap: 1rem; margin-top: 0.5rem;">
-                        <button onclick="changeTheme('dark')" style="padding: 0.5rem 1rem; background: #1e293b; color: white; border: 1px solid #334155; border-radius: 6px; cursor: pointer;">
-                            داكن
+                    <div style="display: flex; gap: 1rem; margin-top: 0.5rem; flex-wrap: wrap;">
+                        <button onclick="changeTheme('dark-blue')" style="padding: 0.5rem 1rem; background: #1e293b; color: white; border: 1px solid #334155; border-radius: 6px; cursor: pointer;">
+                            أسود+أزرق داكن
+                        </button>
+                        <button onclick="changeTheme('white')" style="padding: 0.5rem 1rem; background: #ffffff; color: #000000; border: 1px solid #d1d5db; border-radius: 6px; cursor: pointer;">
+                            أبيض
+                        </button>
+                        <button onclick="changeTheme('black')" style="padding: 0.5rem 1rem; background: #000000; color: white; border: none; border-radius: 6px; cursor: pointer;">
+                            أسود
                         </button>
                         <button onclick="changeTheme('blue')" style="padding: 0.5rem 1rem; background: #1e40af; color: white; border: none; border-radius: 6px; cursor: pointer;">
                             أزرق
-                        </button>
-                        <button onclick="changeTheme('gray')" style="padding: 0.5rem 1rem; background: #475569; color: white; border: none; border-radius: 6px; cursor: pointer;">
-                            رمادي
                         </button>
                     </div>
                 </div>
@@ -548,16 +551,16 @@ HTML_TEMPLATE = '''
             
             <div class="settings-section">
                 <h3 style="margin-bottom: 1rem; color: #cbd5e1;">
-                    <i class="fas fa-shield-alt"></i> الخصوصية
+                    <i class="fas fa-language"></i> اللغة
                 </h3>
                 <div class="setting-item">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <span>حفظ سجل المحادثات</span>
-                        <input type="checkbox" checked style="width: 20px; height: 20px;">
-                    </div>
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem;">
-                        <span>إشعارات الرسائل</span>
-                        <input type="checkbox" checked style="width: 20px; height: 20px;">
+                    <div style="display: flex; gap: 1rem; margin-top: 0.5rem;">
+                        <button onclick="changeLanguage('ar')" style="padding: 0.5rem 1rem; background: #1e40af; color: white; border: none; border-radius: 6px; cursor: pointer;">
+                            العربية
+                        </button>
+                        <button onclick="changeLanguage('en')" style="padding: 0.5rem 1rem; background: #1e293b; color: white; border: 1px solid #334155; border-radius: 6px; cursor: pointer;">
+                            English
+                        </button>
                     </div>
                 </div>
             </div>
@@ -612,17 +615,56 @@ HTML_TEMPLATE = '''
             }
         }
         
-        // تغيير الثيم
+        // تغيير المظهر
         function changeTheme(theme) {
-            if (theme === 'blue') {
+            if (theme === 'white') {
+                document.body.style.backgroundColor = '#ffffff';
+                document.body.style.color = '#000000';
+                document.body.style.fontFamily = 'system-ui, sans-serif';
+            } else if (theme === 'black') {
+                document.body.style.backgroundColor = '#000000';
+                document.body.style.color = '#ffffff';
+                document.body.style.fontFamily = 'system-ui, sans-serif';
+            } else if (theme === 'blue') {
                 document.body.style.backgroundColor = '#0c4a6e';
                 document.body.style.color = '#e0f2fe';
-            } else if (theme === 'gray') {
-                document.body.style.backgroundColor = '#1f2937';
-                document.body.style.color = '#f9fafb';
+                document.body.style.fontFamily = 'system-ui, sans-serif';
             } else {
+                // افتراضي: أسود+أزرق داكن
                 document.body.style.backgroundColor = '#0f172a';
                 document.body.style.color = '#f1f5f9';
+                document.body.style.fontFamily = 'system-ui, sans-serif';
+            }
+        }
+        
+        // تغيير اللغة
+        function changeLanguage(lang) {
+            if (lang === 'en') {
+                // تغيير النصوص إلى الإنجليزية
+                document.documentElement.dir = 'ltr';
+                document.documentElement.lang = 'en';
+                document.querySelector('.app-title').textContent = 'Mocat';
+                document.querySelector('.app-tagline').textContent = 'Secure and fast chat app. Connect with friends with complete privacy and advanced protection.';
+                document.querySelector('[onclick="scrollToSection(\'features\')"] span').textContent = 'Features';
+                document.querySelector('[onclick="scrollToSection(\'developers\')"] span').textContent = 'Developers';
+                document.querySelector('[onclick="scrollToSection(\'security\')"] span').textContent = 'Security';
+                document.querySelector('[onclick="openSettings()"] span').textContent = 'Settings';
+                document.querySelector('[onclick="openFAQ()"] span').textContent = 'FAQ';
+                document.querySelector('.section-title').textContent = 'App Features';
+                // ... يمكنك إضافة المزيد من الترجمة هنا
+            } else {
+                // إعادة النصوص إلى العربية
+                document.documentElement.dir = 'rtl';
+                document.documentElement.lang = 'ar';
+                document.querySelector('.app-title').textContent = 'Mocat';
+                document.querySelector('.app-tagline').textContent = 'تطبيق دردشة آمن وسريع. تواصل مع أصدقائك بخصوصية تامة وحماية متقدمة.';
+                document.querySelector('[onclick="scrollToSection(\'features\')"] span').textContent = 'المميزات';
+                document.querySelector('[onclick="scrollToSection(\'developers\')"] span').textContent = 'المطورون';
+                document.querySelector('[onclick="scrollToSection(\'security\')"] span').textContent = 'الأمان';
+                document.querySelector('[onclick="openSettings()"] span').textContent = 'الإعدادات';
+                document.querySelector('[onclick="openFAQ()"] span').textContent = 'أسئلة شائعة';
+                document.querySelector('.section-title').textContent = 'مميزات التطبيق';
+                // ... يمكنك إضافة المزيد من الترجمة هنا
             }
         }
         
