@@ -1,6 +1,9 @@
 from flask import Flask, render_template_string
 
 app = Flask(__name__)
+@app.route('/google620d181fa7a7ee21.html')
+def google_verification():
+    return "google-site-verification: google620d181fa7a7ee21.html"
 
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
