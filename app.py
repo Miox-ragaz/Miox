@@ -1,80 +1,237 @@
+"""
+🎯 تطبيق مشاركة الملفات المتوافق مع:
+• Pydroid 3 على Android
+• GitHub Codespaces  
+• Replit.com
+• VS Code على الحاسوب
+"""
+
 import os
 import json
 import secrets
-from datetime import datetime
-from flask import Flask, render_template, request, jsonify, send_file, abort
-from flask_socketio import SocketIO, emit
+import threading
+import time
+from datetime import datetime, timedelta
+from flask import Flask, render_template_string, request, jsonify, send_file, abort, Response
 from werkzeug.utils import secure_filename
-import eventlet
-eventlet.monkey_patch()
+from functools import wraps
 
 # ============ التهيئة ============
 app = Flask(__name__)
 app.config['SECRET_KEY'] = secrets.token_hex(16)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
-app.config['ALLOWED_EXTENSIONS'] = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'mp4', 'mp3', 'zip', 'docx'}
-
-socketio = SocketIO(app, cors_allowed_origins="*")
+app.config['ALLOWED_EXTENSIONS'] = {
+    'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 
+    'mp4', 'mp3', 'wav', 'zip', 'rar', 'docx', 
+    'xlsx', 'pptx', 'md', 'py', 'html', 'css', 'js'
+}
 
 # ============ قاعدة البيانات في الذاكرة ============
-users_files = {}  # {username: [file1, file2]}
-files_db = []     # تخزين جميع الملفات
-global_chat = []  # المحادثة العالمية
+class FileSharingDB:
+    def __init__(self):
+        self.files = []
+        self.users = {}
+        self.global_chat = []
+        self.notifications = []
+        self.likes = {}
+        self.file_id_counter = 1
+        self.notification_id_counter = 1
+        
+    def add_file(self, file_data):
+        file_data['id'] = f"file_{self.file_id_counter}"
+        file_data['created_at'] = datetime.now().isoformat()
+        file_data['downloads'] = 0
+        file_data['likes'] = 0
+        file_data['liked_by'] = []
+        file_data['comments'] = []
+        self.file_id_counter += 1
+        self.files.insert(0, file_data)  # إضافة في البداية
+        
+        # إشعار للجميع
+        self.add_notification(
+            f"📁 {file_data['username']} رفع ملف جديد: {file_data['filename']}",
+            "file_upload"
+        )
+        return file_data
+    
+    def add_notification(self, message, notif_type="info"):
+        notif = {
+            'id': f"notif_{self.notification_id_counter}",
+            'message': message,
+            'type': notif_type,
+            'time': datetime.now().isoformat(),
+            'read': False
+        }
+        self.notification_id_counter += 1
+        self.notifications.insert(0, notif)
+        
+        # حفظ آخر 50 إشعار فقط
+        if len(self.notifications) > 50:
+            self.notifications = self.notifications[:50]
+        return notif
+    
+    def like_file(self, file_id, username):
+        for file in self.files:
+            if file['id'] == file_id:
+                if username not in file['liked_by']:
+                    file['liked_by'].append(username)
+                    file['likes'] += 1
+                    
+                    # إشعار للمالك
+                    if username != file['username']:
+                        self.add_notification(
+                            f"❤️ {username} أعجب بملفك: {file['filename']}",
+                            "like"
+                        )
+                    return True
+        return False
+    
+    def get_user_files(self, username):
+        return [f for f in self.files if f['username'] == username]
+    
+    def get_file(self, file_id):
+        for file in self.files:
+            if file['id'] == file_id:
+                return file
+        return None
 
-# الكلمات الممنوعة في الوصف
-BANNED_WORDS = ['سيء', 'ممنوع', 'خطر', 'غير لائق']
-
-# أيقونات الملفات
-FILE_ICONS = {
-    'pdf': '📄', 'txt': '📋', 'doc': '📄', 'docx': '📄',
-    'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️', 'gif': '🖼️',
-    'mp4': '🎬', 'avi': '🎬', 'mov': '🎬',
-    'mp3': '🎵', 'wav': '🎵',
-    'zip': '📦', 'rar': '📦'
-}
+db = FileSharingDB()
 
 # ============ دوال مساعدة ============
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
 def get_file_icon(filename):
+    icons = {
+        'pdf': '📄', 'txt': '📝', 'doc': '📄', 'docx': '📄',
+        'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️', 'gif': '🖼️',
+        'mp4': '🎬', 'avi': '🎬', 'mov': '🎬', 'mkv': '🎬',
+        'mp3': '🎵', 'wav': '🎵', 'ogg': '🎵',
+        'zip': '📦', 'rar': '📦', '7z': '📦',
+        'py': '🐍', 'html': '🌐', 'css': '🎨', 'js': '⚡',
+        'xlsx': '📊', 'pptx': '📊'
+    }
     ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else 'unknown'
-    return FILE_ICONS.get(ext, '📄')
+    return icons.get(ext, '📁')
+
+def get_user_avatar(username):
+    if not username:
+        return "?"
+    return username[0].upper()
+
+def get_user_color(username):
+    colors = ['#4361ee', '#3a0ca3', '#7209b7', '#f72585', '#4cc9f0', 
+              '#2a9d8f', '#e9c46a', '#f4a261', '#e76f51']
+    if not username:
+        return colors[0]
+    hash_val = sum(ord(char) for char in username)
+    return colors[hash_val % len(colors)]
 
 def check_banned_words(text):
-    for word in BANNED_WORDS:
+    banned = ['سيء', 'ممنوع', 'خطر', 'غير لائق', 'سيئ', 'قبيح']
+    for word in banned:
         if word in text.lower():
             return True, f"كلمة '{word}' غير مسموحة"
     return False, ""
 
-def get_user_avatar(username):
-    if username:
-        return username[0].upper()
-    return "?"
+def format_time_ago(dt_str):
+    dt = datetime.fromisoformat(dt_str)
+    now = datetime.now()
+    diff = now - dt
+    
+    if diff < timedelta(minutes=1):
+        return "الآن"
+    elif diff < timedelta(hours=1):
+        minutes = int(diff.total_seconds() / 60)
+        return f"قبل {minutes} دقيقة"
+    elif diff < timedelta(days=1):
+        hours = int(diff.total_seconds() / 3600)
+        return f"قبل {hours} ساعة"
+    else:
+        days = diff.days
+        return f"قبل {days} يوم"
 
-def get_user_color(username):
-    colors = ['#4361ee', '#3a0ca3', '#7209b7', '#f72585', '#4cc9f0']
-    hash_val = sum(ord(char) for char in username) if username else 0
-    return colors[hash_val % len(colors)]
+# ============ SSE للإشعارات الحية ============
+class ServerSentEvents:
+    def __init__(self):
+        self.clients = []
+        self.lock = threading.Lock()
+    
+    def add_client(self):
+        queue = []
+        with self.lock:
+            self.clients.append(queue)
+        return queue
+    
+    def remove_client(self, queue):
+        with self.lock:
+            if queue in self.clients:
+                self.clients.remove(queue)
+    
+    def broadcast(self, data):
+        with self.lock:
+            for client in self.clients:
+                client.append(data)
+
+sse = ServerSentEvents()
+
+def sse_stream():
+    queue = sse.add_client()
+    try:
+        while True:
+            if queue:
+                data = queue.pop(0)
+                yield f"data: {json.dumps(data)}\n\n"
+            else:
+                time.sleep(0.5)  # تقليل استهلاك CPU
+    finally:
+        sse.remove_client(queue)
 
 # ============ Routes ============
 @app.route('/')
 def index():
-    return render_template_string(TEMPLATE, files=files_db, chat_messages=global_chat[-10:])
+    """الصفحة الرئيسية"""
+    return render_template_string(HTML_TEMPLATE, files=db.files[:50], notifications=db.notifications[:10])
 
-@app.route('/upload', methods=['POST'])
+@app.route('/api/events')
+def events():
+    """SSE stream للإشعارات الحية"""
+    response = Response(sse_stream(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'
+    return response
+
+@app.route('/api/notifications')
+def get_notifications():
+    """الحصول على الإشعارات"""
+    return jsonify({
+        'notifications': db.notifications[:20],
+        'unread': len([n for n in db.notifications if not n['read']])
+    })
+
+@app.route('/api/notifications/read', methods=['POST'])
+def mark_notifications_read():
+    """تحديد الإشعارات كمقروءة"""
+    data = request.json
+    notification_ids = data.get('ids', [])
+    
+    for notif in db.notifications:
+        if notif['id'] in notification_ids:
+            notif['read'] = True
+    
+    return jsonify({'success': True})
+
+@app.route('/api/upload', methods=['POST'])
 def upload_file():
+    """رفع ملف جديد"""
     try:
         if 'file' not in request.files:
             return jsonify({'error': 'لم يتم اختيار ملف'}), 400
         
         file = request.files['file']
-        username = request.form.get('username', 'مجهول').strip()
+        username = request.form.get('username', '').strip() or 'مستخدم'
         description = request.form.get('description', '').strip()
-        
-        if not username:
-            return jsonify({'error': 'الرجاء إدخال الاسم'}), 400
         
         if not file or file.filename == '':
             return jsonify({'error': 'الرجاء اختيار ملف'}), 400
@@ -83,8 +240,13 @@ def upload_file():
             return jsonify({'error': 'نوع الملف غير مسموح'}), 400
         
         # التحقق من عدد ملفات المستخدم
-        if username in users_files and len(users_files[username]) >= 5:
-            return jsonify({'error': 'تجاوزت الحد المسموح (5 ملفات لكل مستخدم)'}), 400
+        user_files = db.get_user_files(username)
+        if len(user_files) >= 10:  # 10 ملفات كحد أقصى
+            return jsonify({'error': 'تجاوزت الحد المسموح (10 ملفات لكل مستخدم)'}), 400
+        
+        # التحقق من حجم الملف
+        if file.content_length and file.content_length > app.config['MAX_CONTENT_LENGTH']:
+            return jsonify({'error': 'حجم الملف يتجاوز 50MB'}), 400
         
         # التحقق من الكلمات الممنوعة
         has_banned, message = check_banned_words(description)
@@ -97,69 +259,177 @@ def upload_file():
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
         file.save(filepath)
         
-        # حفظ بيانات الملف
+        # إضافة للمنصة
         file_data = {
             'id': file_id,
             'filename': filename,
             'original_name': filename,
             'username': username,
             'description': description,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'time_ago': 'الآن',
+            'timestamp': datetime.now().isoformat(),
             'size': os.path.getsize(filepath),
             'icon': get_file_icon(filename),
             'avatar': get_user_avatar(username),
             'color': get_user_color(username),
             'downloads': 0,
+            'likes': 0,
+            'liked_by': [],
             'comments': []
         }
         
-        # تحديث قواعد البيانات
-        files_db.append(file_data)
-        if username not in users_files:
-            users_files[username] = []
-        users_files[username].append(file_data)
+        file_obj = db.add_file(file_data)
         
-        # إرسال تحديث للجميع
-        socketio.emit('new_file', file_data, broadcast=True)
+        # إرسال تحديث SSE
+        sse.broadcast({
+            'type': 'new_file',
+            'file': file_obj,
+            'time': datetime.now().isoformat()
+        })
         
-        return jsonify({'success': True, 'file': file_data})
+        return jsonify({
+            'success': True, 
+            'file': file_obj,
+            'message': 'تم رفع الملف بنجاح!'
+        })
     
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/download/<file_id>')
-def download_file(file_id):
-    for file_data in files_db:
-        if file_data['id'] == file_id:
-            file_data['downloads'] += 1
-            filename = file_data['filename']
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
-            
-            # تحديث للجميع
-            socketio.emit('file_updated', file_data, broadcast=True)
-            
-            if os.path.exists(filepath):
-                return send_file(filepath, as_attachment=True, download_name=filename)
-    
-    abort(404)
+        return jsonify({'error': f'حدث خطأ: {str(e)}'}), 500
 
 @app.route('/api/files')
 def get_files():
-    return jsonify(files_db)
+    """الحصول على جميع الملفات"""
+    return jsonify({
+        'files': db.files[:100],
+        'total': len(db.files)
+    })
 
-@app.route('/api/file/<file_id>')
+@app.route('/api/files/<file_id>')
 def get_file(file_id):
-    for file_data in files_db:
-        if file_data['id'] == file_id:
-            return jsonify(file_data)
+    """الحصول على ملف معين"""
+    file = db.get_file(file_id)
+    if file:
+        return jsonify(file)
     return jsonify({'error': 'الملف غير موجود'}), 404
+
+@app.route('/api/download/<file_id>')
+def download_file(file_id):
+    """تنزيل ملف"""
+    file = db.get_file(file_id)
+    if not file:
+        abort(404)
+    
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{file['filename']}")
+    
+    if not os.path.exists(filepath):
+        abort(404)
+    
+    # تحديث عدد التنزيلات
+    file['downloads'] += 1
+    
+    # إشعار للمالك
+    if file['downloads'] == 1:  # أول تنزيل فقط
+        db.add_notification(
+            f"⬇️ {file['filename']} تم تنزيله لأول مرة!",
+            "download"
+        )
+    
+    return send_file(filepath, as_attachment=True, download_name=file['original_name'])
+
+@app.route('/api/like/<file_id>', methods=['POST'])
+def like_file(file_id):
+    """الإعجاب بملف"""
+    data = request.json
+    username = data.get('username', '').strip() or 'مستخدم'
+    
+    if db.like_file(file_id, username):
+        file = db.get_file(file_id)
+        
+        # إرسال تحديث SSE
+        sse.broadcast({
+            'type': 'file_liked',
+            'file_id': file_id,
+            'username': username,
+            'likes': file['likes'],
+            'time': datetime.now().isoformat()
+        })
+        
+        return jsonify({
+            'success': True,
+            'likes': file['likes'],
+            'message': 'تم تسجيل إعجابك!'
+        })
+    
+    return jsonify({'error': 'الملف غير موجود'}), 404
+
+@app.route('/api/comment/<file_id>', methods=['POST'])
+def add_comment(file_id):
+    """إضافة تعليق على ملف"""
+    data = request.json
+    username = data.get('username', '').strip() or 'مستخدم'
+    comment = data.get('comment', '').strip()
+    
+    if not comment:
+        return jsonify({'error': 'التعليق فارغ'}), 400
+    
+    file = db.get_file(file_id)
+    if not file:
+        return jsonify({'error': 'الملف غير موجود'}), 404
+    
+    comment_data = {
+        'id': secrets.token_hex(4),
+        'username': username,
+        'avatar': get_user_avatar(username),
+        'color': get_user_color(username),
+        'comment': comment,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    file['comments'].insert(0, comment_data)
+    
+    # إشعار للمالك
+    if username != file['username']:
+        db.add_notification(
+            f"💬 {username} علق على ملفك: {file['filename'][:20]}...",
+            "comment"
+        )
+    
+    # إرسال تحديث SSE
+    sse.broadcast({
+        'type': 'new_comment',
+        'file_id': file_id,
+        'comment': comment_data,
+        'time': datetime.now().isoformat()
+    })
+    
+    return jsonify({'success': True, 'comment': comment_data})
+
+@app.route('/api/stats/<username>')
+def get_stats(username):
+    """إحصائيات المستخدم"""
+    user_files = db.get_user_files(username)
+    total_size = sum(f['size'] for f in user_files)
+    total_likes = sum(f['likes'] for f in user_files)
+    total_comments = sum(len(f['comments']) for f in user_files)
+    
+    return jsonify({
+        'username': username,
+        'file_count': len(user_files),
+        'max_files': 10,
+        'total_size': total_size,
+        'max_size': 50 * 1024 * 1024,
+        'total_downloads': sum(f['downloads'] for f in user_files),
+        'total_likes': total_likes,
+        'total_comments': total_comments,
+        'avatar': get_user_avatar(username),
+        'color': get_user_color(username)
+    })
 
 @app.route('/api/chat', methods=['GET', 'POST'])
 def chat():
+    """المحادثة العالمية"""
     if request.method == 'POST':
         data = request.json
-        username = data.get('username', 'مجهول')
+        username = data.get('username', '').strip() or 'مستخدم'
         message = data.get('message', '').strip()
         
         if not message:
@@ -171,88 +441,60 @@ def chat():
             'avatar': get_user_avatar(username),
             'color': get_user_color(username),
             'message': message,
-            'timestamp': datetime.now().strftime('%H:%M')
+            'timestamp': datetime.now().isoformat()
         }
         
-        global_chat.append(chat_message)
+        db.global_chat.append(chat_message)
         
-        # إرسال للجميع
-        socketio.emit('new_message', chat_message, broadcast=True)
+        # حفظ آخر 200 رسالة فقط
+        if len(db.global_chat) > 200:
+            db.global_chat = db.global_chat[-200:]
         
-        return jsonify({'success': True})
+        # إرسال تحديث SSE
+        sse.broadcast({
+            'type': 'new_chat_message',
+            'message': chat_message,
+            'time': datetime.now().isoformat()
+        })
+        
+        return jsonify({'success': True, 'message': chat_message})
     
-    return jsonify(global_chat[-20:])
-
-@app.route('/api/comment/<file_id>', methods=['POST'])
-def add_comment(file_id):
-    data = request.json
-    username = data.get('username', 'مجهول')
-    comment = data.get('comment', '').strip()
-    
-    if not comment:
-        return jsonify({'error': 'التعليق فارغ'}), 400
-    
-    for file_data in files_db:
-        if file_data['id'] == file_id:
-            comment_data = {
-                'id': secrets.token_hex(4),
-                'username': username,
-                'avatar': get_user_avatar(username),
-                'color': get_user_color(username),
-                'comment': comment,
-                'timestamp': datetime.now().strftime('%H:%M')
-            }
-            
-            file_data['comments'].append(comment_data)
-            
-            # تحديث للجميع
-            socketio.emit('new_comment', {
-                'file_id': file_id,
-                'comment': comment_data
-            }, broadcast=True)
-            
-            return jsonify({'success': True})
-    
-    return jsonify({'error': 'الملف غير موجود'}), 404
-
-@app.route('/api/stats/<username>')
-def get_stats(username):
-    user_files = [f for f in files_db if f['username'] == username]
-    total_size = sum(f['size'] for f in user_files)
-    
+    # GET: إرجاع آخر الرسائل
     return jsonify({
-        'file_count': len(user_files),
-        'max_files': 5,
-        'total_size': total_size,
-        'max_size': 50 * 1024 * 1024,
-        'comments_count': sum(len(f['comments']) for f in user_files)
+        'messages': db.global_chat[-50:],
+        'total': len(db.global_chat)
     })
 
-# ============ SocketIO Events ============
-@socketio.on('connect')
-def handle_connect():
-    emit('connected', {'message': 'Connected successfully'})
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    print('Client disconnected')
-
 # ============ HTML Template ============
-TEMPLATE = '''
+HTML_TEMPLATE = '''
 <!DOCTYPE html>
-<html dir="rtl">
+<html dir="rtl" lang="ar">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>مشاركة الملفات</title>
+    <title>📁 مشاركة الملفات - متوافق مع كل المنصات</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
+        :root {
+            --primary: #4361ee;
+            --secondary: #3a0ca3;
+            --accent: #f72585;
+            --success: #2a9d8f;
+            --warning: #e9c46a;
+            --danger: #e63946;
+            --light: #f8f9fa;
+            --dark: #212529;
+            --gray: #6c757d;
+            --shadow: 0 4px 20px rgba(0,0,0,0.1);
+            --radius: 12px;
+            --transition: all 0.3s ease;
+        }
+        
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: 'Segoe UI', 'Cairo', Tahoma, sans-serif;
         }
         
         body {
@@ -260,6 +502,7 @@ TEMPLATE = '''
             min-height: 100vh;
             padding: 20px;
             padding-bottom: 100px;
+            color: var(--dark);
         }
         
         .container {
@@ -267,50 +510,108 @@ TEMPLATE = '''
             margin: 0 auto;
         }
         
+        /* الهيدر */
         .header {
-            text-align: center;
-            color: white;
-            margin-bottom: 30px;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: var(--radius);
             padding: 20px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 20px;
+            margin-bottom: 25px;
+            box-shadow: var(--shadow);
+            text-align: center;
             backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
         }
         
         .header h1 {
-            font-size: 2.5rem;
+            color: var(--primary);
             margin-bottom: 10px;
+            font-size: 2.2rem;
         }
         
         .header p {
-            opacity: 0.9;
+            color: var(--gray);
+            font-size: 1rem;
         }
         
-        /* كروت الملفات */
-        .files-list {
+        /* شريط الإشعارات */
+        .notifications-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: var(--warning);
+            color: var(--dark);
+            padding: 10px;
+            text-align: center;
+            z-index: 1000;
+            display: none;
+            animation: slideDown 0.3s ease-out;
+        }
+        
+        @keyframes slideDown {
+            from { transform: translateY(-100%); }
+            to { transform: translateY(0); }
+        }
+        
+        /* إشعارات */
+        .notifications-panel {
+            position: fixed;
+            top: 60px;
+            left: 20px;
+            right: 20px;
+            background: white;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            padding: 15px;
+            z-index: 999;
+            display: none;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .notification-item {
+            padding: 10px;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            animation: fadeIn 0.5s ease;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .notification-item.unread {
+            background: #f0f8ff;
+            border-right: 4px solid var(--primary);
+        }
+        
+        .notification-icon {
+            font-size: 1.2rem;
+        }
+        
+        /* قائمة الملفات */
+        .files-container {
             display: flex;
             flex-direction: column;
             gap: 20px;
-            margin-bottom: 100px;
         }
         
         .file-card {
             background: white;
-            border-radius: 15px;
+            border-radius: var(--radius);
             padding: 20px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-            transition: transform 0.3s, box-shadow 0.3s;
-            animation: fadeIn 0.5s ease-out;
-        }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
+            box-shadow: var(--shadow);
+            transition: var(--transition);
+            animation: fadeInUp 0.6s ease-out;
+            border: 1px solid #eee;
         }
         
         .file-card:hover {
             transform: translateY(-5px);
-            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.15);
+            box-shadow: 0 8px 30px rgba(0,0,0,0.15);
         }
         
         .file-header {
@@ -318,275 +619,185 @@ TEMPLATE = '''
             justify-content: space-between;
             align-items: center;
             margin-bottom: 15px;
-            border-bottom: 2px solid #f0f0f0;
             padding-bottom: 10px;
+            border-bottom: 2px solid #f0f0f0;
         }
         
         .user-info {
             display: flex;
             align-items: center;
-            gap: 10px;
+            gap: 12px;
         }
         
         .user-avatar {
-            width: 40px;
-            height: 40px;
+            width: 45px;
+            height: 45px;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
             font-weight: bold;
-            font-size: 18px;
+            font-size: 20px;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+        }
+        
+        .user-details {
+            flex: 1;
         }
         
         .user-name {
-            font-weight: bold;
-            color: #333;
+            font-weight: 700;
+            color: var(--dark);
+            font-size: 1.1rem;
         }
         
-        .time-ago {
-            color: #888;
-            font-size: 0.9rem;
+        .file-time {
+            color: var(--gray);
+            font-size: 0.85rem;
+            margin-top: 3px;
+        }
+        
+        .file-size {
+            background: var(--light);
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            color: var(--gray);
+        }
+        
+        .file-content {
+            margin: 15px 0;
         }
         
         .file-name {
             display: flex;
             align-items: center;
-            gap: 10px;
-            font-size: 1.2rem;
-            margin-bottom: 15px;
-            color: #333;
+            gap: 12px;
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: var(--dark);
+            margin-bottom: 10px;
         }
         
         .file-icon {
-            font-size: 1.5rem;
+            font-size: 2rem;
+        }
+        
+        .file-description {
+            color: var(--gray);
+            line-height: 1.6;
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-right: 3px solid var(--primary);
+        }
+        
+        .file-stats {
+            display: flex;
+            gap: 15px;
+            margin: 15px 0;
+            color: var(--gray);
+            font-size: 0.9rem;
+        }
+        
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
         }
         
         .file-actions {
-            display: flex;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
             gap: 10px;
-            margin-top: 15px;
+            margin-top: 20px;
         }
         
-        .btn {
-            flex: 1;
+        .action-btn {
             padding: 12px;
             border: none;
             border-radius: 10px;
-            font-weight: bold;
+            font-weight: 600;
             cursor: pointer;
             display: flex;
             align-items: center;
             justify-content: center;
             gap: 8px;
-            transition: all 0.3s;
+            transition: var(--transition);
             font-size: 0.9rem;
         }
         
+        .action-btn i {
+            font-size: 1.1rem;
+        }
+        
         .btn-download {
-            background: #4361ee;
+            background: var(--primary);
             color: white;
         }
         
         .btn-download:hover {
-            background: #3a0ca3;
+            background: var(--secondary);
         }
         
-        .btn-comments {
-            background: #f0f0f0;
-            color: #333;
-        }
-        
-        .btn-comments:hover {
-            background: #ddd;
-        }
-        
-        .btn-description {
-            background: #4cc9f0;
+        .btn-like {
+            background: linear-gradient(45deg, #ff6b6b, #ff8e8e);
             color: white;
         }
         
-        .btn-description:hover {
-            background: #3a86ff;
+        .btn-like:hover {
+            background: linear-gradient(45deg, #ff5252, #ff7b7b);
         }
         
-        .description-box {
-            margin-top: 15px;
-            padding: 15px;
-            background: #f8f9fa;
-            border-radius: 10px;
-            border-right: 4px solid #4cc9f0;
-            display: none;
+        .btn-like.liked {
+            background: linear-gradient(45deg, #ff4757, #ff6b81);
         }
         
-        /* نافذة الرفع */
-        .upload-overlay {
+        .btn-comment {
+            background: var(--success);
+            color: white;
+        }
+        
+        .btn-comment:hover {
+            background: #23857a;
+        }
+        
+        .btn-share {
+            background: var(--accent);
+            color: white;
+        }
+        
+        .btn-share:hover {
+            background: #e1156d;
+        }
+        
+        /* زر الإضافة */
+        .add-btn {
             position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.8);
-            display: none;
-            align-items: center;
-            justify-content: center;
-            z-index: 1000;
-        }
-        
-        .upload-modal {
-            background: white;
-            border-radius: 20px;
-            width: 90%;
-            max-width: 500px;
-            padding: 30px;
-            animation: modalSlide 0.3s ease-out;
-        }
-        
-        @keyframes modalSlide {
-            from { transform: translateY(-50px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
-        }
-        
-        .modal-header {
-            text-align: center;
-            margin-bottom: 25px;
-        }
-        
-        .modal-header h2 {
-            color: #4361ee;
-            margin-bottom: 10px;
-        }
-        
-        .steps {
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-            margin-bottom: 25px;
-        }
-        
-        .step {
-            width: 30px;
-            height: 30px;
+            bottom: 80px;
+            right: 50%;
+            transform: translateX(50%);
+            width: 70px;
+            height: 70px;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            border: none;
             border-radius: 50%;
+            font-size: 2rem;
+            cursor: pointer;
+            box-shadow: 0 6px 25px rgba(67, 97, 238, 0.5);
+            transition: var(--transition);
+            z-index: 100;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-weight: bold;
-            color: white;
-            background: #ddd;
         }
         
-        .step.active {
-            background: #4361ee;
-        }
-        
-        .step.completed {
-            background: #2a9d8f;
-        }
-        
-        .form-group {
-            margin-bottom: 20px;
-        }
-        
-        .form-group label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: bold;
-            color: #555;
-        }
-        
-        .form-control {
-            width: 100%;
-            padding: 12px 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 10px;
-            font-size: 1rem;
-            transition: border-color 0.3s;
-        }
-        
-        .form-control:focus {
-            outline: none;
-            border-color: #4361ee;
-        }
-        
-        .file-input-wrapper {
-            position: relative;
-            overflow: hidden;
-            display: inline-block;
-            width: 100%;
-        }
-        
-        .file-input-wrapper input[type=file] {
-            position: absolute;
-            left: 0;
-            top: 0;
-            opacity: 0;
-            width: 100%;
-            height: 100%;
-            cursor: pointer;
-        }
-        
-        .file-input-label {
-            display: block;
-            padding: 15px;
-            background: #f0f0f0;
-            border-radius: 10px;
-            text-align: center;
-            cursor: pointer;
-            border: 2px dashed #ccc;
-            transition: all 0.3s;
-        }
-        
-        .file-input-label:hover {
-            background: #e0e0e0;
-            border-color: #4361ee;
-        }
-        
-        .error-message {
-            color: #e63946;
-            background: #ffeaea;
-            padding: 10px;
-            border-radius: 8px;
-            margin-top: 10px;
-            display: none;
-        }
-        
-        .success-message {
-            color: #2a9d8f;
-            background: #e8f4f3;
-            padding: 10px;
-            border-radius: 8px;
-            margin-top: 10px;
-            display: none;
-        }
-        
-        .modal-buttons {
-            display: flex;
-            gap: 10px;
-            margin-top: 25px;
-        }
-        
-        .modal-buttons .btn {
-            flex: 1;
-        }
-        
-        .btn-primary {
-            background: #4361ee;
-            color: white;
-        }
-        
-        .btn-primary:hover {
-            background: #3a0ca3;
-        }
-        
-        .btn-secondary {
-            background: #f0f0f0;
-            color: #333;
-        }
-        
-        .btn-secondary:hover {
-            background: #ddd;
+        .add-btn:hover {
+            transform: translateX(50%) scale(1.1);
+            box-shadow: 0 8px 30px rgba(67, 97, 238, 0.6);
         }
         
         /* البار السفلي */
@@ -595,12 +806,14 @@ TEMPLATE = '''
             bottom: 0;
             left: 0;
             right: 0;
-            background: white;
+            background: rgba(255, 255, 255, 0.98);
+            backdrop-filter: blur(10px);
             display: flex;
             justify-content: space-around;
-            padding: 15px 0;
-            box-shadow: 0 -5px 20px rgba(0, 0, 0, 0.1);
+            padding: 15px 10px;
+            box-shadow: 0 -5px 25px rgba(0,0,0,0.1);
             z-index: 100;
+            border-top: 1px solid rgba(255,255,255,0.2);
         }
         
         .nav-btn {
@@ -610,53 +823,71 @@ TEMPLATE = '''
             gap: 5px;
             background: none;
             border: none;
-            color: #888;
-            font-size: 0.9rem;
+            color: var(--gray);
+            font-size: 0.8rem;
             cursor: pointer;
-            transition: color 0.3s;
-            padding: 10px 20px;
-            border-radius: 50px;
+            transition: var(--transition);
+            padding: 10px 15px;
+            border-radius: 15px;
+            flex: 1;
+            max-width: 100px;
         }
         
-        .nav-btn:hover {
-            color: #4361ee;
-            background: #f0f0f0;
-        }
-        
-        .nav-btn.active {
-            color: #4361ee;
-            font-weight: bold;
+        .nav-btn:hover, .nav-btn.active {
+            color: var(--primary);
+            background: rgba(67, 97, 238, 0.1);
         }
         
         .nav-btn i {
-            font-size: 1.5rem;
+            font-size: 1.4rem;
         }
         
-        /* نافذة المحادثة */
-        .chat-overlay {
+        .notification-badge {
+            position: absolute;
+            top: 0;
+            right: 20px;
+            background: var(--danger);
+            color: white;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            font-size: 0.7rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        /* المودال */
+        .modal-overlay {
             position: fixed;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
-            background: rgba(0, 0, 0, 0.8);
+            background: rgba(0,0,0,0.7);
             display: none;
             align-items: center;
             justify-content: center;
             z-index: 1000;
+            padding: 20px;
         }
         
-        .chat-modal {
+        .modal {
             background: white;
-            border-radius: 20px;
-            width: 90%;
+            border-radius: var(--radius);
+            width: 100%;
             max-width: 500px;
-            height: 80vh;
-            display: flex;
-            flex-direction: column;
+            max-height: 90vh;
+            overflow-y: auto;
+            animation: modalSlide 0.3s ease-out;
         }
         
-        .chat-header {
+        @keyframes modalSlide {
+            from { transform: translateY(50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        
+        .modal-header {
             padding: 20px;
             border-bottom: 2px solid #f0f0f0;
             display: flex;
@@ -664,255 +895,252 @@ TEMPLATE = '''
             align-items: center;
         }
         
-        .chat-messages {
-            flex: 1;
+        .modal-body {
             padding: 20px;
-            overflow-y: auto;
-            display: flex;
-            flex-direction: column;
-            gap: 15px;
         }
         
-        .message {
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--dark);
+        }
+        
+        .form-control {
+            width: 100%;
             padding: 12px 15px;
-            border-radius: 15px;
-            max-width: 80%;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1rem;
+            transition: var(--transition);
+        }
+        
+        .form-control:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.2);
+        }
+        
+        .file-input-wrapper {
             position: relative;
+            overflow: hidden;
+            border-radius: 10px;
+            border: 2px dashed #ccc;
+            padding: 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: var(--transition);
         }
         
-        .message.sent {
-            background: #4361ee;
-            color: white;
-            align-self: flex-end;
-            border-bottom-right-radius: 5px;
+        .file-input-wrapper:hover {
+            border-color: var(--primary);
+            background: #f8f9ff;
         }
         
-        .message.received {
-            background: #f0f0f0;
-            color: #333;
-            align-self: flex-start;
-            border-bottom-left-radius: 5px;
+        .file-input-wrapper input {
+            position: absolute;
+            left: 0;
+            top: 0;
+            opacity: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
         }
         
-        .message-header {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 5px;
-            font-size: 0.9rem;
-        }
-        
-        .chat-input-area {
-            padding: 15px;
+        .modal-footer {
+            padding: 20px;
             border-top: 2px solid #f0f0f0;
             display: flex;
             gap: 10px;
         }
         
-        .chat-input {
+        .btn {
             flex: 1;
-            padding: 12px 15px;
-            border: 2px solid #e0e0e0;
-            border-radius: 25px;
-            font-size: 1rem;
-        }
-        
-        .chat-input:focus {
-            outline: none;
-            border-color: #4361ee;
-        }
-        
-        .btn-send {
-            background: #4361ee;
-            color: white;
+            padding: 12px;
             border: none;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: var(--transition);
+        }
+        
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: var(--secondary);
+        }
+        
+        .btn-secondary {
+            background: #f0f0f0;
+            color: var(--dark);
+        }
+        
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+        
+        /* التعليقات */
+        .comments-section {
+            margin-top: 20px;
+            border-top: 2px solid #f0f0f0;
+            padding-top: 15px;
+        }
+        
+        .comment {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+        
+        .comment-avatar {
+            width: 35px;
+            height: 35px;
             border-radius: 50%;
-            width: 50px;
-            height: 50px;
             display: flex;
             align-items: center;
             justify-content: center;
-            cursor: pointer;
-            transition: background 0.3s;
+            color: white;
+            font-weight: bold;
+            flex-shrink: 0;
         }
         
-        .btn-send:hover {
-            background: #3a0ca3;
+        .comment-content {
+            flex: 1;
         }
         
-        /* التحميل */
+        /* تحميل */
         .loading {
             text-align: center;
-            padding: 30px;
-            color: #666;
+            padding: 40px;
+            color: var(--gray);
         }
         
-        /* رسائل النظام */
-        .system-message {
-            text-align: center;
-            padding: 10px;
-            background: #e8f4f3;
-            color: #2a9d8f;
+        .loading i {
+            font-size: 2rem;
+            margin-bottom: 15px;
+            color: var(--primary);
+        }
+        
+        /* رسائل */
+        .alert {
+            padding: 12px 15px;
             border-radius: 10px;
             margin: 10px 0;
-            font-size: 0.9rem;
+            display: none;
+        }
+        
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        
+        .alert-error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        
+        .alert-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .file-actions {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .file-header {
+                flex-direction: column;
+                gap: 10px;
+                align-items: flex-start;
+            }
+            
+            .file-size {
+                align-self: flex-start;
+            }
+            
+            .modal {
+                width: 95%;
+            }
+            
+            .add-btn {
+                bottom: 70px;
+                right: 20px;
+                transform: none;
+            }
+        }
+        
+        /* Animation for new items */
+        @keyframes highlight {
+            0% { background-color: #e3f2fd; }
+            100% { background-color: white; }
+        }
+        
+        .highlight {
+            animation: highlight 3s ease;
         }
     </style>
 </head>
 <body>
+    <!-- شريط الإشعارات المباشرة -->
+    <div class="notifications-bar" id="liveNotificationBar">
+        <span id="liveNotificationText"></span>
+        <button onclick="hideLiveNotification()" style="margin-right: 15px; background: none; border: none; color: inherit;">✕</button>
+    </div>
+    
+    <!-- لوحة الإشعارات -->
+    <div class="notifications-panel" id="notificationsPanel">
+        <h3 style="margin-bottom: 15px; color: var(--primary);">
+            <i class="fas fa-bell"></i> الإشعارات
+        </h3>
+        <div id="notificationsList">
+            <!-- الإشعارات تظهر هنا -->
+        </div>
+    </div>
+    
     <div class="container">
+        <!-- الهيدر -->
         <div class="header">
             <h1><i class="fas fa-share-alt"></i> مشاركة الملفات</h1>
-            <p>شارك ملفاتك مع الآخرين بسهولة وأمان</p>
-        </div>
-        
-        <div class="files-list" id="filesList">
-            {% for file in files %}
-            <div class="file-card" id="file-{{ file.id }}">
-                <div class="file-header">
-                    <div class="user-info">
-                        <div class="user-avatar" style="background-color: {{ file.color }};">
-                            {{ file.avatar }}
-                        </div>
-                        <div>
-                            <div class="user-name">{{ file.username }}</div>
-                            <div class="time-ago">{{ file.time_ago }}</div>
-                        </div>
-                    </div>
-                    <div class="file-size">{{ (file.size / 1024 / 1024)|round(2) }} MB</div>
-                </div>
-                
-                <div class="file-name">
-                    <span class="file-icon">{{ file.icon }}</span>
-                    <span>{{ file.filename }}</span>
-                </div>
-                
-                <div class="file-actions">
-                    <button class="btn btn-download" onclick="downloadFile('{{ file.id }}', '{{ file.filename }}')">
-                        <i class="fas fa-download"></i> تنزيل ({{ file.downloads }})
-                    </button>
-                    <button class="btn btn-comments" onclick="showComments('{{ file.id }}')">
-                        <i class="fas fa-comment"></i> تعليقات ({{ file.comments|length }})
-                    </button>
-                    <button class="btn btn-description" onclick="toggleDescription('{{ file.id }}')">
-                        <i class="fas fa-info-circle"></i> وصف
-                    </button>
-                </div>
-                
-                <div class="description-box" id="desc-{{ file.id }}">
-                    <p>{{ file.description }}</p>
-                </div>
-            </div>
-            {% endfor %}
-        </div>
-        
-        <div class="loading" id="loading" style="display: none;">
-            <i class="fas fa-spinner fa-spin"></i> جاري التحميل...
-        </div>
-    </div>
-    
-    <!-- نافذة رفع الملف -->
-    <div class="upload-overlay" id="uploadOverlay">
-        <div class="upload-modal">
-            <div class="modal-header">
-                <h2><i class="fas fa-cloud-upload-alt"></i> رفع ملف جديد</h2>
-                <p>شارك ملفك مع الآخرين</p>
-            </div>
-            
-            <div class="steps">
-                <div class="step active" id="step1">1</div>
-                <div class="step" id="step2">2</div>
-            </div>
-            
-            <div id="step1Content">
-                <div class="form-group">
-                    <label for="username"><i class="fas fa-user"></i> اسمك</label>
-                    <input type="text" id="username" class="form-control" placeholder="أدخل اسمك" value="مستخدم">
-                </div>
-                
-                <div class="form-group">
-                    <label for="file"><i class="fas fa-file"></i> اختر الملف</label>
-                    <div class="file-input-wrapper">
-                        <input type="file" id="file" class="form-control" onchange="updateFileName()">
-                        <div class="file-input-label" id="fileLabel">
-                            <i class="fas fa-cloud-upload-alt"></i>
-                            <span>انقر لاختيار الملف</span>
-                            <div style="font-size: 0.9rem; margin-top: 5px; color: #666;">
-                                الحد الأقصى: 50MB | 5 ملفات لكل مستخدم
-                            </div>
-                        </div>
-                    </div>
-                    <div id="fileName" style="margin-top: 10px; color: #666;"></div>
-                </div>
-                
-                <div class="error-message" id="step1Error"></div>
-                
-                <div class="modal-buttons">
-                    <button class="btn btn-secondary" onclick="closeUploadModal()">إلغاء</button>
-                    <button class="btn btn-primary" onclick="nextStep()">التالي <i class="fas fa-arrow-left"></i></button>
-                </div>
-            </div>
-            
-            <div id="step2Content" style="display: none;">
-                <div class="form-group">
-                    <label for="description"><i class="fas fa-edit"></i> وصف الملف</label>
-                    <textarea id="description" class="form-control" rows="4" placeholder="اكتب وصفًا للملف..."></textarea>
-                    <div style="font-size: 0.9rem; color: #666; margin-top: 5px;">
-                        تجنب الكلمات المخالفة للسياسة
-                    </div>
-                </div>
-                
-                <div class="form-group">
-                    <div class="file-info" style="background: #f8f9fa; padding: 15px; border-radius: 10px;">
-                        <strong>ملخص الملف:</strong>
-                        <div id="fileSummary"></div>
-                    </div>
-                </div>
-                
-                <div class="error-message" id="step2Error"></div>
-                <div class="success-message" id="successMessage"></div>
-                
-                <div class="modal-buttons">
-                    <button class="btn btn-secondary" onclick="prevStep()">رجوع <i class="fas fa-arrow-right"></i></button>
-                    <button class="btn btn-primary" onclick="uploadFile()" id="uploadBtn">
-                        <i class="fas fa-upload"></i> رفع الملف
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- نافذة المحادثة -->
-    <div class="chat-overlay" id="chatOverlay">
-        <div class="chat-modal">
-            <div class="chat-header">
-                <h2><i class="fas fa-comments"></i> المحادثة العالمية</h2>
-                <button onclick="closeChatModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer;">✕</button>
-            </div>
-            
-            <div class="chat-messages" id="chatMessages">
-                {% for msg in chat_messages %}
-                <div class="message {% if msg.username == 'مستخدم' %}sent{% else %}received{% endif %}">
-                    <div class="message-header">
-                        <div class="user-avatar" style="width: 25px; height: 25px; font-size: 12px; background-color: {{ msg.color }};">
-                            {{ msg.avatar }}
-                        </div>
-                        <strong>{{ msg.username }}</strong>
-                        <span style="font-size: 0.8rem; opacity: 0.7;">{{ msg.timestamp }}</span>
-                    </div>
-                    <div>{{ msg.message }}</div>
-                </div>
-                {% endfor %}
-            </div>
-            
-            <div class="chat-input-area">
-                <input type="text" class="chat-input" id="chatInput" placeholder="اكتب رسالة..." onkeypress="if(event.key == 'Enter') sendMessage()">
-                <button class="btn-send" onclick="sendMessage()">
-                    <i class="fas fa-paper-plane"></i>
+            <p>شارك ملفاتك مع الآخرين وتابع من يعجب بها!</p>
+            <div style="margin-top: 10px;">
+                <button onclick="toggleNotifications()" class="btn" style="background: var(--warning); color: var(--dark);">
+                    <i class="fas fa-bell"></i>
+                    <span id="notificationCount">0</span>
                 </button>
             </div>
         </div>
+        
+        <!-- الملفات -->
+        <div class="files-container" id="filesContainer">
+            <!-- الملفات تظهر هنا -->
+        </div>
+        
+        <!-- التحميل -->
+        <div class="loading" id="loading">
+            <i class="fas fa-spinner fa-spin"></i>
+            <p>جاري تحميل الملفات...</p>
+        </div>
     </div>
+    
+    <!-- زر الإضافة -->
+    <button class="add-btn" onclick="showUploadModal()" id="addButton">
+        <i class="fas fa-plus"></i>
+    </button>
     
     <!-- البار السفلي -->
     <div class="bottom-nav">
@@ -924,400 +1152,964 @@ TEMPLATE = '''
             <i class="fas fa-comments"></i>
             <span>المحادثة</span>
         </button>
-        <button class="nav-btn" onclick="showUploadModal()" style="background: #4361ee; color: white; border-radius: 50%; width: 60px; height: 60px; margin-top: -20px; box-shadow: 0 5px 15px rgba(67, 97, 238, 0.4);">
-            <i class="fas fa-plus" style="font-size: 1.8rem;"></i>
+        <button class="nav-btn" onclick="showUploadModal()">
+            <i class="fas fa-upload"></i>
+            <span>رفع</span>
         </button>
-        <button class="nav-btn" onclick="showStats()">
+        <button class="nav-btn" onclick="showStatsModal()">
             <i class="fas fa-user"></i>
             <span>حسابي</span>
         </button>
+        <button class="nav-btn" onclick="toggleNotifications()">
+            <i class="fas fa-bell"></i>
+            <span>إشعارات</span>
+            <span class="notification-badge" id="navNotificationBadge" style="display: none;">0</span>
+        </button>
+    </div>
+    
+    <!-- مودال رفع الملف -->
+    <div class="modal-overlay" id="uploadModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2><i class="fas fa-cloud-upload-alt"></i> رفع ملف جديد</h2>
+                <button onclick="hideUploadModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer;">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="uploadForm">
+                    <div class="form-group">
+                        <label class="form-label">اسمك</label>
+                        <input type="text" id="username" class="form-control" placeholder="أدخل اسمك" value="مستخدم" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">اختر الملف</label>
+                        <div class="file-input-wrapper">
+                            <input type="file" id="fileInput" class="form-control" required>
+                            <div>
+                                <i class="fas fa-cloud-upload-alt" style="font-size: 3rem; color: var(--primary); margin-bottom: 10px;"></i>
+                                <p style="font-weight: bold;">انقر لاختيار ملف</p>
+                                <p style="font-size: 0.9rem; color: var(--gray); margin-top: 5px;">
+                                    الحد الأقصى: 50MB | 10 ملفات لكل مستخدم
+                                </p>
+                            </div>
+                        </div>
+                        <div id="fileName" style="margin-top: 10px; padding: 10px; background: #f8f9fa; border-radius: 8px; display: none;"></div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">وصف الملف (اختياري)</label>
+                        <textarea id="description" class="form-control" rows="3" placeholder="اكتب وصفًا للملف..."></textarea>
+                    </div>
+                    
+                    <div class="alert alert-error" id="uploadError"></div>
+                    <div class="alert alert-success" id="uploadSuccess"></div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="hideUploadModal()">إلغاء</button>
+                <button type="button" class="btn btn-primary" onclick="uploadFile()" id="uploadBtn">
+                    <i class="fas fa-upload"></i> رفع الملف
+                </button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- مودال الإحصائيات -->
+    <div class="modal-overlay" id="statsModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2><i class="fas fa-chart-line"></i> إحصائياتي</h2>
+                <button onclick="hideStatsModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer;">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="statsContent">
+                    <!-- الإحصائيات تظهر هنا -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- مودال المحادثة -->
+    <div class="modal-overlay" id="chatModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2><i class="fas fa-comments"></i> المحادثة العالمية</h2>
+                <button onclick="hideChatModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer;">&times;</button>
+            </div>
+            <div class="modal-body" style="height: 400px; display: flex; flex-direction: column;">
+                <div id="chatMessages" style="flex: 1; overflow-y: auto; padding: 10px; background: #f8f9fa; border-radius: 8px;">
+                    <!-- الرسائل تظهر هنا -->
+                </div>
+                <div style="display: flex; gap: 10px; margin-top: 15px;">
+                    <input type="text" id="chatInput" class="form-control" placeholder="اكتب رسالة..." style="flex: 1;">
+                    <button class="btn btn-primary" onclick="sendChatMessage()">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
     </div>
     
     <script>
-        // SocketIO Connection
-        const socket = io();
+        // الحالة العامة
+        let currentUsername = 'مستخدم';
+        let likedFiles = new Set();
+        let eventSource = null;
         
-        // تحديثات الوقت
-        function updateTimeAgo() {
-            document.querySelectorAll('.time-ago').forEach(el => {
-                // يمكن إضافة منطق حساب الوقت هنا
+        // تهيئة الصفحة
+        document.addEventListener('DOMContentLoaded', function() {
+            // تحديث الاسم من localStorage
+            const savedUsername = localStorage.getItem('fileShare_username');
+            if (savedUsername) {
+                currentUsername = savedUsername;
+                document.getElementById('username').value = savedUsername;
+            }
+            
+            // تحميل الملفات
+            loadFiles();
+            
+            // بدء الاتصال بالإشعارات الحية
+            connectToNotifications();
+            
+            // تحديث عدد الإشعارات
+            updateNotificationCount();
+            
+            // تحديث الاسم عند التغيير
+            document.getElementById('username').addEventListener('change', function() {
+                currentUsername = this.value || 'مستخدم';
+                localStorage.setItem('fileShare_username', currentUsername);
             });
+            
+            // إخفاء التحميل بعد 3 ثواني
+            setTimeout(() => {
+                document.getElementById('loading').style.display = 'none';
+            }, 3000);
+        });
+        
+        // الاتصال بالإشعارات الحية (SSE)
+        function connectToNotifications() {
+            if (eventSource) eventSource.close();
+            
+            eventSource = new EventSource('/api/events');
+            
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                handleLiveNotification(data);
+            };
+            
+            eventSource.onerror = function() {
+                console.log('SSE connection error, reconnecting...');
+                setTimeout(connectToNotifications, 3000);
+            };
         }
         
-        // Socket Events
-        socket.on('new_file', function(file) {
-            addFileToUI(file);
-        });
+        // معالجة الإشعارات الحية
+        function handleLiveNotification(data) {
+            console.log('إشعار مباشر:', data);
+            
+            switch(data.type) {
+                case 'new_file':
+                    showLiveNotification(`📁 ${data.file.username} رفع ملف جديد: ${data.file.filename}`);
+                    addFileToUI(data.file);
+                    break;
+                    
+                case 'file_liked':
+                    if (data.username !== currentUsername) {
+                        showLiveNotification(`❤️ ${data.username} أعجب بملفك!`);
+                    }
+                    updateFileLikes(data.file_id, data.likes);
+                    break;
+                    
+                case 'new_comment':
+                    showLiveNotification(`💬 ${data.comment.username} علق على ملفك`);
+                    break;
+                    
+                case 'new_chat_message':
+                    // تحديث المحادثة إذا كانت مفتوحة
+                    if (document.getElementById('chatModal').style.display === 'flex') {
+                        addChatMessage(data.message);
+                    }
+                    break;
+            }
+            
+            // تحديث عدد الإشعارات
+            updateNotificationCount();
+        }
         
-        socket.on('file_updated', function(file) {
-            updateFileUI(file);
-        });
+        // عرض إشعار مباشر
+        function showLiveNotification(message) {
+            const bar = document.getElementById('liveNotificationBar');
+            const text = document.getElementById('liveNotificationText');
+            
+            text.textContent = message;
+            bar.style.display = 'block';
+            
+            // إخفاء تلقائي بعد 5 ثواني
+            setTimeout(() => {
+                bar.style.display = 'none';
+            }, 5000);
+        }
         
-        socket.on('new_message', function(message) {
-            addMessageToUI(message);
-        });
+        function hideLiveNotification() {
+            document.getElementById('liveNotificationBar').style.display = 'none';
+        }
         
-        socket.on('new_comment', function(data) {
-            // يمكن إضافة تحديث التعليقات هنا
-            console.log('تعليق جديد:', data);
-        });
+        // تحميل الملفات
+        async function loadFiles() {
+            try {
+                const response = await fetch('/api/files');
+                const data = await response.json();
+                
+                const container = document.getElementById('filesContainer');
+                container.innerHTML = '';
+                
+                if (data.files.length === 0) {
+                    container.innerHTML = `
+                        <div class="file-card" style="text-align: center;">
+                            <i class="fas fa-folder-open" style="font-size: 3rem; color: var(--gray); margin-bottom: 15px;"></i>
+                            <h3 style="color: var(--gray);">لا توجد ملفات بعد</h3>
+                            <p style="color: var(--gray);">كن أول من يرفع ملف!</p>
+                            <button onclick="showUploadModal()" class="btn btn-primary" style="margin-top: 15px;">
+                                <i class="fas fa-plus"></i> رفع ملف جديد
+                            </button>
+                        </div>
+                    `;
+                    return;
+                }
+                
+                data.files.forEach(file => {
+                    addFileToUI(file);
+                });
+                
+                document.getElementById('loading').style.display = 'none';
+                
+            } catch (error) {
+                console.error('خطأ في تحميل الملفات:', error);
+                document.getElementById('loading').innerHTML = `
+                    <i class="fas fa-exclamation-triangle" style="color: var(--danger);"></i>
+                    <p>حدث خطأ في تحميل الملفات</p>
+                    <button onclick="loadFiles()" class="btn btn-primary">إعادة المحاولة</button>
+                `;
+            }
+        }
         
-        socket.on('connected', function(data) {
-            console.log('Connected to server');
-        });
-        
-        // إضافة ملف جديد للواجهة
+        // إضافة ملف للواجهة
         function addFileToUI(file) {
-            const filesList = document.getElementById('filesList');
+            const container = document.getElementById('filesContainer');
             const loading = document.getElementById('loading');
             
             if (loading.style.display !== 'none') {
                 loading.style.display = 'none';
             }
             
+            const timeAgo = formatTimeAgo(file.timestamp || file.created_at);
+            const isLiked = likedFiles.has(file.id) || (file.liked_by && file.liked_by.includes(currentUsername));
+            
             const fileCard = document.createElement('div');
-            fileCard.className = 'file-card';
-            fileCard.id = 'file-' + file.id;
+            fileCard.className = 'file-card highlight';
+            fileCard.id = `file-${file.id}`;
             fileCard.innerHTML = `
                 <div class="file-header">
                     <div class="user-info">
                         <div class="user-avatar" style="background-color: ${file.color};">
                             ${file.avatar}
                         </div>
-                        <div>
+                        <div class="user-details">
                             <div class="user-name">${file.username}</div>
-                            <div class="time-ago">${file.time_ago}</div>
+                            <div class="file-time">${timeAgo}</div>
                         </div>
                     </div>
-                    <div class="file-size">${(file.size / 1024 / 1024).toFixed(2)} MB</div>
+                    <div class="file-size">${formatFileSize(file.size)}</div>
                 </div>
                 
-                <div class="file-name">
-                    <span class="file-icon">${file.icon}</span>
-                    <span>${file.filename}</span>
+                <div class="file-content">
+                    <div class="file-name">
+                        <span class="file-icon">${file.icon}</span>
+                        <span>${file.filename}</span>
+                    </div>
+                    
+                    ${file.description ? `
+                    <div class="file-description">
+                        ${file.description}
+                    </div>
+                    ` : ''}
+                    
+                    <div class="file-stats">
+                        <div class="stat-item">
+                            <i class="fas fa-download"></i>
+                            <span>${file.downloads || 0}</span>
+                        </div>
+                        <div class="stat-item">
+                            <i class="fas fa-heart"></i>
+                            <span>${file.likes || 0}</span>
+                        </div>
+                        <div class="stat-item">
+                            <i class="fas fa-comment"></i>
+                            <span>${(file.comments || []).length}</span>
+                        </div>
+                    </div>
                 </div>
                 
                 <div class="file-actions">
-                    <button class="btn btn-download" onclick="downloadFile('${file.id}', '${file.filename}')">
-                        <i class="fas fa-download"></i> تنزيل (0)
+                    <button class="action-btn btn-download" onclick="downloadFile('${file.id}')">
+                        <i class="fas fa-download"></i> تنزيل
                     </button>
-                    <button class="btn btn-comments" onclick="showComments('${file.id}')">
-                        <i class="fas fa-comment"></i> تعليقات (0)
+                    <button class="action-btn btn-like ${isLiked ? 'liked' : ''}" onclick="likeFile('${file.id}')" id="like-btn-${file.id}">
+                        <i class="fas fa-heart"></i> أعجبني
                     </button>
-                    <button class="btn btn-description" onclick="toggleDescription('${file.id}')">
-                        <i class="fas fa-info-circle"></i> وصف
+                    <button class="action-btn btn-comment" onclick="showComments('${file.id}')">
+                        <i class="fas fa-comment"></i> تعليق
+                    </button>
+                    <button class="action-btn btn-share" onclick="shareFile('${file.id}')">
+                        <i class="fas fa-share-alt"></i> مشاركة
                     </button>
                 </div>
                 
-                <div class="description-box" id="desc-${file.id}" style="display: none;">
-                    <p>${file.description}</p>
-                </div>
-            `;
-            
-            filesList.insertBefore(fileCard, filesList.firstChild);
-            
-            // رسالة نظام
-            showSystemMessage(`تم رفع ملف جديد: ${file.filename}`);
-        }
-        
-        // تحديث ملف في الواجهة
-        function updateFileUI(file) {
-            const fileCard = document.getElementById('file-' + file.id);
-            if (fileCard) {
-                const downloadBtn = fileCard.querySelector('.btn-download');
-                if (downloadBtn) {
-                    downloadBtn.innerHTML = `<i class="fas fa-download"></i> تنزيل (${file.downloads})`;
-                }
-                
-                const commentsBtn = fileCard.querySelector('.btn-comments');
-                if (commentsBtn) {
-                    commentsBtn.innerHTML = `<i class="fas fa-comment"></i> تعليقات (${file.comments.length})`;
-                }
-            }
-        }
-        
-        // إضافة رسالة للواجهة
-        function addMessageToUI(message) {
-            const chatMessages = document.getElementById('chatMessages');
-            const isCurrentUser = message.username === document.getElementById('username').value;
-            
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${isCurrentUser ? 'sent' : 'received'}`;
-            messageDiv.innerHTML = `
-                <div class="message-header">
-                    <div class="user-avatar" style="width: 25px; height: 25px; font-size: 12px; background-color: ${message.color};">
-                        ${message.avatar}
+                ${(file.comments || []).length > 0 ? `
+                <div class="comments-section" id="comments-${file.id}" style="display: none;">
+                    <h4 style="margin-bottom: 10px;">التعليقات</h4>
+                    ${(file.comments || []).slice(0, 3).map(comment => `
+                        <div class="comment">
+                            <div class="comment-avatar" style="background-color: ${comment.color};">
+                                ${comment.avatar}
+                            </div>
+                            <div class="comment-content">
+                                <strong>${comment.username}</strong>
+                                <p>${comment.comment}</p>
+                                <small>${formatTimeAgo(comment.timestamp)}</small>
+                            </div>
+                        </div>
+                    `).join('')}
+                    ${(file.comments || []).length > 3 ? `
+                        <p style="text-align: center; color: var(--gray);">
+                            + ${(file.comments || []).length - 3} تعليقات أخرى
+                        </p>
+                    ` : ''}
+                    <div style="display: flex; gap: 10px; margin-top: 10px;">
+                        <input type="text" id="comment-input-${file.id}" class="form-control" placeholder="اكتب تعليق...">
+                        <button class="btn btn-primary" onclick="addComment('${file.id}')">
+                            <i class="fas fa-paper-plane"></i>
+                        </button>
                     </div>
-                    <strong>${message.username}</strong>
-                    <span style="font-size: 0.8rem; opacity: 0.7;">${message.timestamp}</span>
                 </div>
-                <div>${message.message}</div>
+                ` : ''}
             `;
             
-            chatMessages.appendChild(messageDiv);
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-        }
-        
-        // نافذة الرفع
-        let currentStep = 1;
-        let selectedFile = null;
-        
-        function showUploadModal() {
-            document.getElementById('uploadOverlay').style.display = 'flex';
-            resetUploadForm();
-        }
-        
-        function closeUploadModal() {
-            document.getElementById('uploadOverlay').style.display = 'none';
-            resetUploadForm();
-        }
-        
-        function resetUploadForm() {
-            currentStep = 1;
-            selectedFile = null;
-            document.getElementById('step1').className = 'step active';
-            document.getElementById('step2').className = 'step';
-            document.getElementById('step1Content').style.display = 'block';
-            document.getElementById('step2Content').style.display = 'none';
-            document.getElementById('step1Error').style.display = 'none';
-            document.getElementById('step2Error').style.display = 'none';
-            document.getElementById('successMessage').style.display = 'none';
-            document.getElementById('fileName').innerHTML = '';
-            document.getElementById('file').value = '';
-            document.getElementById('description').value = '';
-        }
-        
-        function updateFileName() {
-            const fileInput = document.getElementById('file');
-            const fileNameDiv = document.getElementById('fileName');
+            // إضافة في البداية
+            container.insertBefore(fileCard, container.firstChild);
             
-            if (fileInput.files.length > 0) {
-                selectedFile = fileInput.files[0];
-                fileNameDiv.innerHTML = `<i class="fas fa-check-circle" style="color: #2a9d8f;"></i> ${selectedFile.name} (${(selectedFile.size / 1024 / 1024).toFixed(2)} MB)`;
+            // إزالة التأثير بعد 3 ثواني
+            setTimeout(() => {
+                fileCard.classList.remove('highlight');
+            }, 3000);
+        }
+        
+        // تحديث عدد الإعجابات
+        function updateFileLikes(fileId, likes) {
+            const likeBtn = document.getElementById(`like-btn-${fileId}`);
+            if (likeBtn) {
+                const heartIcon = likeBtn.querySelector('i');
+                const countSpan = likeBtn.querySelector('span');
+                
+                if (countSpan) {
+                    countSpan.textContent = likes;
+                }
+                
+                // إذا كان المستخدم قد أعجب بهذا الملف
+                if (likedFiles.has(fileId)) {
+                    likeBtn.classList.add('liked');
+                    heartIcon.className = 'fas fa-heart';
+                }
             }
         }
         
-        function nextStep() {
-            const username = document.getElementById('username').value.trim();
-            const fileInput = document.getElementById('file');
-            const errorDiv = document.getElementById('step1Error');
-            
-            if (!username) {
-                errorDiv.textContent = 'الرجاء إدخال اسمك';
-                errorDiv.style.display = 'block';
-                return;
-            }
+        // رفع ملف
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const username = document.getElementById('username').value.trim() || 'مستخدم';
+            const description = document.getElementById('description').value.trim();
+            const uploadBtn = document.getElementById('uploadBtn');
+            const errorDiv = document.getElementById('uploadError');
+            const successDiv = document.getElementById('uploadSuccess');
             
             if (!fileInput.files.length) {
-                errorDiv.textContent = 'الرجاء اختيار ملف';
-                errorDiv.style.display = 'block';
+                showError('الرجاء اختيار ملف');
                 return;
             }
             
-            selectedFile = fileInput.files[0];
+            const file = fileInput.files[0];
             
             // التحقق من الحجم
-            if (selectedFile.size > 50 * 1024 * 1024) {
-                errorDiv.textContent = 'حجم الملف يتجاوز 50MB';
-                errorDiv.style.display = 'block';
+            if (file.size > 50 * 1024 * 1024) {
+                showError('حجم الملف يتجاوز 50MB');
                 return;
             }
             
-            errorDiv.style.display = 'none';
-            
-            // الانتقال للخطوة 2
-            currentStep = 2;
-            document.getElementById('step1').className = 'step completed';
-            document.getElementById('step2').className = 'step active';
-            document.getElementById('step1Content').style.display = 'none';
-            document.getElementById('step2Content').style.display = 'block';
-            
-            // عرض ملخص الملف
-            document.getElementById('fileSummary').innerHTML = `
-                <div>الاسم: ${selectedFile.name}</div>
-                <div>الحجم: ${(selectedFile.size / 1024 / 1024).toFixed(2)} MB</div>
-                <div>المستخدم: ${username}</div>
-            `;
-        }
-        
-        function prevStep() {
-            currentStep = 1;
-            document.getElementById('step1').className = 'step active';
-            document.getElementById('step2').className = 'step';
-            document.getElementById('step1Content').style.display = 'block';
-            document.getElementById('step2Content').style.display = 'none';
-            document.getElementById('step2Error').style.display = 'none';
-        }
-        
-        function uploadFile() {
-            const username = document.getElementById('username').value.trim();
-            const description = document.getElementById('description').value.trim();
-            const errorDiv = document.getElementById('step2Error');
-            const successDiv = document.getElementById('successMessage');
-            const uploadBtn = document.getElementById('uploadBtn');
-            
-            // التحقق من الوصف
-            if (!description) {
-                errorDiv.textContent = 'الرجاء إدخال وصف للملف';
-                errorDiv.style.display = 'block';
-                return;
-            }
-            
-            // إرسال الملف
+            // إعداد البيانات
             const formData = new FormData();
             formData.append('username', username);
             formData.append('description', description);
-            formData.append('file', selectedFile);
+            formData.append('file', file);
             
+            // عرض التحميل
             uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الرفع...';
             uploadBtn.disabled = true;
+            errorDiv.style.display = 'none';
+            successDiv.style.display = 'none';
             
-            fetch('/upload', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
+            try {
+                const response = await fetch('/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
                 if (data.error) {
-                    errorDiv.textContent = data.error;
-                    errorDiv.style.display = 'block';
-                    successDiv.style.display = 'none';
+                    showError(data.error);
                 } else {
-                    errorDiv.style.display = 'none';
-                    successDiv.textContent = '✓ تم رفع الملف بنجاح!';
-                    successDiv.style.display = 'block';
+                    showSuccess(data.message || 'تم رفع الملف بنجاح!');
                     
+                    // إعادة تعيين النموذج
+                    fileInput.value = '';
+                    document.getElementById('fileName').style.display = 'none';
+                    document.getElementById('description').value = '';
+                    
+                    // إغلاق المودال بعد 2 ثانية
                     setTimeout(() => {
-                        closeUploadModal();
+                        hideUploadModal();
                         successDiv.style.display = 'none';
                     }, 2000);
                 }
+                
+            } catch (error) {
+                showError('حدث خطأ أثناء الرفع');
+            } finally {
                 uploadBtn.innerHTML = '<i class="fas fa-upload"></i> رفع الملف';
                 uploadBtn.disabled = false;
-            })
-            .catch(error => {
-                errorDiv.textContent = 'حدث خطأ أثناء الرفع';
+            }
+            
+            function showError(message) {
+                errorDiv.textContent = message;
                 errorDiv.style.display = 'block';
-                uploadBtn.innerHTML = '<i class="fas fa-upload"></i> رفع الملف';
-                uploadBtn.disabled = false;
-            });
+                successDiv.style.display = 'none';
+            }
+            
+            function showSuccess(message) {
+                successDiv.textContent = message;
+                successDiv.style.display = 'block';
+                errorDiv.style.display = 'none';
+            }
         }
         
-        // نافذة المحادثة
+        // تنزيل ملف
+        async function downloadFile(fileId) {
+            try {
+                const response = await fetch(`/api/download/${fileId}`);
+                
+                if (!response.ok) {
+                    throw new Error('فشل التنزيل');
+                }
+                
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                
+                // الحصول على اسم الملف من الرأس
+                const contentDisposition = response.headers.get('content-disposition');
+                let filename = 'file';
+                
+                if (contentDisposition) {
+                    const match = contentDisposition.match(/filename="?([^"]+)"?/);
+                    if (match) filename = match[1];
+                }
+                
+                a.download = filename;
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+                showLiveNotification('تم تنزيل الملف بنجاح!');
+                
+            } catch (error) {
+                alert('حدث خطأ أثناء التنزيل: ' + error.message);
+            }
+        }
+        
+        // الإعجاب بملف
+        async function likeFile(fileId) {
+            const likeBtn = document.getElementById(`like-btn-${fileId}`);
+            
+            // منع النقر المزدوج
+            if (likeBtn.disabled) return;
+            
+            likeBtn.disabled = true;
+            
+            try {
+                const response = await fetch(`/api/like/${fileId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        username: currentUsername
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    // تحديث الزر
+                    likeBtn.classList.add('liked');
+                    const heartIcon = likeBtn.querySelector('i');
+                    heartIcon.className = 'fas fa-heart';
+                    
+                    // تحديث العدد
+                    const countSpan = likeBtn.querySelector('span');
+                    if (countSpan) {
+                        countSpan.textContent = data.likes;
+                    }
+                    
+                    // حفظ في الذاكرة
+                    likedFiles.add(fileId);
+                    
+                    // إشعار محلي
+                    if (data.message) {
+                        showLiveNotification(data.message);
+                    }
+                }
+                
+            } catch (error) {
+                console.error('خطأ في الإعجاب:', error);
+            } finally {
+                likeBtn.disabled = false;
+            }
+        }
+        
+        // إضافة تعليق
+        async function addComment(fileId) {
+            const input = document.getElementById(`comment-input-${fileId}`);
+            const comment = input.value.trim();
+            
+            if (!comment) {
+                alert('الرجاء كتابة تعليق');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/comment/${fileId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        username: currentUsername,
+                        comment: comment
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    input.value = '';
+                    showLiveNotification('تم إضافة تعليقك!');
+                    
+                    // إظهار قسم التعليقات إذا كان مخفيًا
+                    const commentsSection = document.getElementById(`comments-${fileId}`);
+                    if (commentsSection) {
+                        commentsSection.style.display = 'block';
+                    }
+                }
+                
+            } catch (error) {
+                console.error('خطأ في إضافة التعليق:', error);
+            }
+        }
+        
+        // عرض التعليقات
+        function showComments(fileId) {
+            const commentsSection = document.getElementById(`comments-${fileId}`);
+            if (commentsSection) {
+                commentsSection.style.display = commentsSection.style.display === 'none' ? 'block' : 'none';
+            } else {
+                alert('لا توجد تعليقات بعد. كن أول من يعلق!');
+            }
+        }
+        
+        // مشاركة ملف
+        function shareFile(fileId) {
+            const fileCard = document.getElementById(`file-${fileId}`);
+            if (fileCard) {
+                const fileTitle = fileCard.querySelector('.user-name').textContent + ' - ' + 
+                                fileCard.querySelector('.file-name span:nth-child(2)').textContent;
+                
+                if (navigator.share) {
+                    navigator.share({
+                        title: fileTitle,
+                        text: 'شاهد هذا الملف على تطبيق مشاركة الملفات',
+                        url: window.location.href + '#file-' + fileId
+                    });
+                } else {
+                    // نسخ الرابط
+                    const link = window.location.href.split('#')[0] + '#file-' + fileId;
+                    navigator.clipboard.writeText(link);
+                    showLiveNotification('تم نسخ رابط الملف!');
+                }
+            }
+        }
+        
+        // تحديث عدد الإشعارات
+        async function updateNotificationCount() {
+            try {
+                const response = await fetch('/api/notifications');
+                const data = await response.json();
+                
+                const count = data.unread || 0;
+                document.getElementById('notificationCount').textContent = count;
+                
+                const badge = document.getElementById('navNotificationBadge');
+                if (count > 0) {
+                    badge.textContent = count > 9 ? '9+' : count;
+                    badge.style.display = 'flex';
+                } else {
+                    badge.style.display = 'none';
+                }
+                
+                // تحديث قائمة الإشعارات
+                updateNotificationsList(data.notifications);
+                
+            } catch (error) {
+                console.error('خطأ في تحميل الإشعارات:', error);
+            }
+        }
+        
+        // تحديث قائمة الإشعارات
+        function updateNotificationsList(notifications) {
+            const list = document.getElementById('notificationsList');
+            
+            if (!notifications || notifications.length === 0) {
+                list.innerHTML = '<p style="text-align: center; color: var(--gray);">لا توجد إشعارات</p>';
+                return;
+            }
+            
+            list.innerHTML = notifications.map(notif => `
+                <div class="notification-item ${notif.read ? '' : 'unread'}" data-id="${notif.id}">
+                    <div class="notification-icon">
+                        ${getNotificationIcon(notif.type)}
+                    </div>
+                    <div style="flex: 1;">
+                        <div>${notif.message}</div>
+                        <small style="color: var(--gray);">${formatTimeAgo(notif.time)}</small>
+                    </div>
+                </div>
+            `).join('');
+        }
+        
+        function getNotificationIcon(type) {
+            const icons = {
+                'file_upload': '📁',
+                'like': '❤️',
+                'comment': '💬',
+                'download': '⬇️',
+                'info': 'ℹ️'
+            };
+            return icons[type] || '🔔';
+        }
+        
+        // تبديل عرض الإشعارات
+        function toggleNotifications() {
+            const panel = document.getElementById('notificationsPanel');
+            panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
+            
+            // تحديث عند الفتح
+            if (panel.style.display === 'block') {
+                updateNotificationCount();
+                markNotificationsAsRead();
+            }
+        }
+        
+        // تحديد الإشعارات كمقروءة
+        async function markNotificationsAsRead() {
+            try {
+                // الحصول على الإشعارات غير المقروءة
+                const response = await fetch('/api/notifications');
+                const data = await response.json();
+                
+                const unreadIds = data.notifications
+                    .filter(n => !n.read)
+                    .map(n => n.id);
+                
+                if (unreadIds.length > 0) {
+                    await fetch('/api/notifications/read', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            ids: unreadIds
+                        })
+                    });
+                    
+                    // تحديث العدد
+                    updateNotificationCount();
+                }
+                
+            } catch (error) {
+                console.error('خطأ في تحديد الإشعارات كمقروءة:', error);
+            }
+        }
+        
+        // دوال المودال
+        function showUploadModal() {
+            document.getElementById('uploadModal').style.display = 'flex';
+        }
+        
+        function hideUploadModal() {
+            document.getElementById('uploadModal').style.display = 'none';
+            document.getElementById('uploadError').style.display = 'none';
+            document.getElementById('uploadSuccess').style.display = 'none';
+        }
+        
+        function showStatsModal() {
+            const modal = document.getElementById('statsModal');
+            const content = document.getElementById('statsContent');
+            
+            // تحميل الإحصائيات
+            fetch(`/api/stats/${currentUsername}`)
+                .then(response => response.json())
+                .then(data => {
+                    content.innerHTML = `
+                        <div style="text-align: center; margin-bottom: 20px;">
+                            <div class="user-avatar" style="width: 80px; height: 80px; margin: 0 auto 15px; background-color: ${data.color}; font-size: 2rem;">
+                                ${data.avatar}
+                            </div>
+                            <h3>${data.username}</h3>
+                        </div>
+                        
+                        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-bottom: 25px;">
+                            <div style="background: #f8f9fa; padding: 15px; border-radius: var(--radius); text-align: center;">
+                                <div style="font-size: 2rem; color: var(--primary); font-weight: bold;">${data.file_count}</div>
+                                <div style="color: var(--gray);">ملف</div>
+                            </div>
+                            <div style="background: #f8f9fa; padding: 15px; border-radius: var(--radius); text-align: center;">
+                                <div style="font-size: 2rem; color: var(--success); font-weight: bold;">${data.total_downloads}</div>
+                                <div style="color: var(--gray);">تنزيل</div>
+                            </div>
+                            <div style="background: #f8f9fa; padding: 15px; border-radius: var(--radius); text-align: center;">
+                                <div style="font-size: 2rem; color: var(--accent); font-weight: bold;">${data.total_likes}</div>
+                                <div style="color: var(--gray);">إعجاب</div>
+                            </div>
+                            <div style="background: #f8f9fa; padding: 15px; border-radius: var(--radius); text-align: center;">
+                                <div style="font-size: 2rem; color: var(--warning); font-weight: bold;">${data.total_comments}</div>
+                                <div style="color: var(--gray);">تعليق</div>
+                            </div>
+                        </div>
+                        
+                        <div style="background: linear-gradient(135deg, var(--primary), var(--secondary)); color: white; padding: 15px; border-radius: var(--radius); text-align: center;">
+                            <div style="font-size: 1.2rem; margin-bottom: 5px;">المساحة المستخدمة</div>
+                            <div style="font-size: 1.5rem; font-weight: bold;">
+                                ${formatFileSize(data.total_size)} / 50MB
+                            </div>
+                            <div style="height: 10px; background: rgba(255,255,255,0.2); border-radius: 5px; margin-top: 10px; overflow: hidden;">
+                                <div style="height: 100%; background: white; width: ${Math.min(100, (data.total_size / (50 * 1024 * 1024)) * 100)}%;"></div>
+                            </div>
+                        </div>
+                        
+                        <div style="margin-top: 20px; color: var(--gray); text-align: center;">
+                            يمكنك رفع ${10 - data.file_count} ملفات أخرى
+                        </div>
+                    `;
+                    
+                    modal.style.display = 'flex';
+                })
+                .catch(error => {
+                    content.innerHTML = `<p style="color: var(--danger); text-align: center;">حدث خطأ في تحميل الإحصائيات</p>`;
+                    modal.style.display = 'flex';
+                });
+        }
+        
+        function hideStatsModal() {
+            document.getElementById('statsModal').style.display = 'none';
+        }
+        
         function showChatModal() {
-            document.getElementById('chatOverlay').style.display = 'flex';
-            document.getElementById('chatInput').focus();
+            const modal = document.getElementById('chatModal');
+            modal.style.display = 'flex';
+            
+            // تحميل الرسائل
+            loadChatMessages();
         }
         
-        function closeChatModal() {
-            document.getElementById('chatOverlay').style.display = 'none';
+        function hideChatModal() {
+            document.getElementById('chatModal').style.display = 'none';
         }
         
-        function sendMessage() {
+        async function loadChatMessages() {
+            try {
+                const response = await fetch('/api/chat');
+                const data = await response.json();
+                
+                const container = document.getElementById('chatMessages');
+                container.innerHTML = '';
+                
+                if (data.messages && data.messages.length > 0) {
+                    data.messages.forEach(msg => {
+                        addChatMessage(msg);
+                    });
+                    
+                    // التمرير للأسفل
+                    container.scrollTop = container.scrollHeight;
+                } else {
+                    container.innerHTML = '<p style="text-align: center; color: var(--gray); padding: 20px;">لا توجد رسائل بعد. كن أول من يرسل!</p>';
+                }
+                
+            } catch (error) {
+                console.error('خطأ في تحميل الرسائل:', error);
+            }
+        }
+        
+        function addChatMessage(msg) {
+            const container = document.getElementById('chatMessages');
+            const isCurrentUser = msg.username === currentUsername;
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.style.marginBottom = '10px';
+            messageDiv.style.display = 'flex';
+            messageDiv.style.flexDirection = isCurrentUser ? 'row-reverse' : 'row';
+            messageDiv.style.alignItems = 'flex-start';
+            messageDiv.style.gap = '10px';
+            
+            messageDiv.innerHTML = `
+                <div class="user-avatar" style="width: 35px; height: 35px; flex-shrink: 0; background-color: ${msg.color};">
+                    ${msg.avatar}
+                </div>
+                <div style="max-width: 70%;">
+                    <div style="font-size: 0.8rem; color: var(--gray); margin-bottom: 3px; text-align: ${isCurrentUser ? 'right' : 'left'}">
+                        ${msg.username} • ${formatTimeAgo(msg.timestamp)}
+                    </div>
+                    <div style="background: ${isCurrentUser ? 'var(--primary)' : '#e9ecef'}; 
+                                color: ${isCurrentUser ? 'white' : 'var(--dark)'}; 
+                                padding: 10px 15px; 
+                                border-radius: 15px;
+                                border-bottom-${isCurrentUser ? 'left' : 'right'}-radius: 5px;
+                                word-break: break-word;
+                                text-align: ${isCurrentUser ? 'right' : 'left'}">
+                        ${msg.message}
+                    </div>
+                </div>
+            `;
+            
+            container.appendChild(messageDiv);
+            container.scrollTop = container.scrollHeight;
+        }
+        
+        async function sendChatMessage() {
             const input = document.getElementById('chatInput');
-            const username = document.getElementById('username').value.trim() || 'مستخدم';
             const message = input.value.trim();
             
             if (!message) return;
             
-            fetch('/api/chat', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    username: username,
-                    message: message
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        username: currentUsername,
+                        message: message
+                    })
+                });
+                
+                const data = await response.json();
+                
                 if (data.success) {
                     input.value = '';
+                    addChatMessage(data.message);
                 }
-            });
-        }
-        
-        // التنزيل والتعليقات
-        function downloadFile(fileId, filename) {
-            fetch(`/download/${fileId}`)
-                .then(response => {
-                    if (response.ok) {
-                        return response.blob();
-                    }
-                    throw new Error('فشل التنزيل');
-                })
-                .then(blob => {
-                    const url = window.URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = filename;
-                    document.body.appendChild(a);
-                    a.click();
-                    window.URL.revokeObjectURL(url);
-                    document.body.removeChild(a);
-                    
-                    showSystemMessage(`تم تنزيل الملف: ${filename}`);
-                })
-                .catch(error => {
-                    alert('حدث خطأ أثناء التنزيل: ' + error.message);
-                });
-        }
-        
-        function toggleDescription(fileId) {
-            const desc = document.getElementById('desc-' + fileId);
-            if (desc.style.display === 'none' || desc.style.display === '') {
-                desc.style.display = 'block';
-            } else {
-                desc.style.display = 'none';
+                
+            } catch (error) {
+                console.error('خطأ في إرسال الرسالة:', error);
             }
         }
         
-        function showComments(fileId) {
-            alert('ميزة التعليقات قيد التطوير. سيتم إضافتها قريبًا!');
-        }
-        
-        function showHome() {
-            // تحديث القائمة
-            window.location.reload();
-        }
-        
-        function showStats() {
-            const username = document.getElementById('username').value.trim() || 'مستخدم';
-            fetch(`/api/stats/${username}`)
-                .then(response => response.json())
-                .then(data => {
-                    alert(`إحصائيات ${username}:
-                    
-• الملفات المرفوعة: ${data.file_count}/${data.max_files}
-• المساحة المستخدمة: ${(data.total_size / 1024 / 1024).toFixed(2)}MB/${data.max_size / 1024 / 1024}MB
-• التعليقات المكتوبة: ${data.comments_count}
-                    
-يمكنك رفع ${data.max_files - data.file_count} ملفات أخرى.`);
-                });
-        }
-        
-        function showSystemMessage(message) {
-            const filesList = document.getElementById('filesList');
-            const systemMsg = document.createElement('div');
-            systemMsg.className = 'system-message';
-            systemMsg.innerHTML = `<i class="fas fa-info-circle"></i> ${message}`;
-            filesList.insertBefore(systemMsg, filesList.firstChild);
+        // دوال المساعدة
+        function formatTimeAgo(timestamp) {
+            if (!timestamp) return 'قبل وقت';
             
-            setTimeout(() => {
-                systemMsg.remove();
-            }, 5000);
+            const date = new Date(timestamp);
+            const now = new Date();
+            const diff = now - date;
+            
+            const minute = 60 * 1000;
+            const hour = 60 * minute;
+            const day = 24 * hour;
+            
+            if (diff < minute) {
+                return 'الآن';
+            } else if (diff < hour) {
+                const minutes = Math.floor(diff / minute);
+                return `قبل ${minutes} دقيقة`;
+            } else if (diff < day) {
+                const hours = Math.floor(diff / hour);
+                return `قبل ${hours} ساعة`;
+            } else {
+                const days = Math.floor(diff / day);
+                return `قبل ${days} يوم`;
+            }
         }
         
-        // تحميل الملفات عند بدء التشغيل
-        window.onload = function() {
-            fetch('/api/files')
-                .then(response => response.json())
-                .then(files => {
-                    const loading = document.getElementById('loading');
-                    if (loading) loading.style.display = 'none';
-                });
-        };
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' بايت';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' ك.ب';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' م.ب';
+        }
+        
+        // عند اختيار ملف
+        document.getElementById('fileInput').addEventListener('change', function() {
+            const fileNameDiv = document.getElementById('fileName');
+            
+            if (this.files.length > 0) {
+                const file = this.files[0];
+                fileNameDiv.innerHTML = `
+                    <strong><i class="fas fa-file"></i> ${file.name}</strong>
+                    <div style="color: var(--gray); font-size: 0.9rem;">
+                        ${formatFileSize(file.size)} • ${file.type || 'نوع غير معروف'}
+                    </div>
+                `;
+                fileNameDiv.style.display = 'block';
+            } else {
+                fileNameDiv.style.display = 'none';
+            }
+        });
+        
+        // إغلاق النوافذ عند النقر خارجها
+        window.addEventListener('click', function(event) {
+            // إغلاق لوحة الإشعارات
+            const panel = document.getElementById('notificationsPanel');
+            if (panel.style.display === 'block' && !event.target.closest('.notifications-panel') && 
+                !event.target.closest('.nav-btn') && !event.target.closest('#notificationCount')) {
+                panel.style.display = 'none';
+            }
+            
+            // إغلاق المودالات
+            const modals = ['uploadModal', 'statsModal', 'chatModal'];
+            modals.forEach(modalId => {
+                const modal = document.getElementById(modalId);
+                if (modal.style.display === 'flex' && event.target === modal) {
+                    modal.style.display = 'none';
+                }
+            });
+        });
+        
+        // دعم الإدخال بالزر Enter في المحادثة
+        document.getElementById('chatInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendChatMessage();
+            }
+        });
     </script>
 </body>
 </html>
@@ -1325,17 +2117,21 @@ TEMPLATE = '''
 
 # ============ تشغيل التطبيق ============
 if __name__ == '__main__':
-    # إنشاء مجلد التحميل إذا لم يكن موجودًا
+    # إنشاء مجلد التحميل
     if not os.path.exists(app.config['UPLOAD_FOLDER']):
         os.makedirs(app.config['UPLOAD_FOLDER'])
-        print(f"تم إنشاء مجلد '{app.config['UPLOAD_FOLDER']}'")
+        print(f"📁 تم إنشاء مجلد '{app.config['UPLOAD_FOLDER']}'")
     
-    print("\n" + "="*50)
-    print("🚀 تطبيق مشاركة الملفات يعمل!")
-    print("="*50)
-    print(f"🌐 افتح المتصفح واذهب إلى: http://localhost:5000")
-    print(f"📁 مجلد التحميل: {app.config['UPLOAD_FOLDER']}")
-    print(f"⚡ SocketIO يعمل على نفس المنفذ")
-    print("="*50 + "\n")
+    print("\n" + "="*60)
+    print("🚀 تطبيق مشاركة الملفات يعمل على كل المنصات!")
+    print("="*60)
+    print("✅ متوافق مع: Pydroid 3 | GitHub | Replit | VS Code")
+    print("✅ الإشعارات الحية: نعم (بدون SocketIO)")
+    print("✅ الإعجابات: نعم")
+    print("✅ المحادثة العالمية: نعم")
+    print("✅ نظام الإشعارات: نعم")
+    print("🌐 افتح المتصفح واذهب إلى: http://127.0.0.1:5000")
+    print("="*60)
     
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    # التشغيل
+    app.run(host='127.0.0.1', port=5000, debug=False, threaded=True)
