@@ -1,1188 +1,1341 @@
-from flask import Flask, render_template_string
+import os
+import json
+import secrets
+from datetime import datetime
+from flask import Flask, render_template, request, jsonify, send_file, abort
+from flask_socketio import SocketIO, emit
+from werkzeug.utils import secure_filename
+import eventlet
+eventlet.monkey_patch()
 
+# ============ التهيئة ============
 app = Flask(__name__)
-@app.route('/google620d181fa7a7ee21.html')
-def google_verification():
-    return "google-site-verification: google620d181fa7a7ee21.html"
-@app.route('/robots.txt')
-def robots():
-    return """User-agent: *
-Allow: /
-Sitemap: https://mocat.onrender.com/sitemap.xml"""
-@app.route('/sitemap.xml')
-def sitemap():
-    return """<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-<url>
-<loc>https://mocat.onrender.com/</loc>
-<lastmod>2024-01-20</lastmod>
-<changefreq>weekly</changefreq>
-<priority>1.0</priority>
-</url>
-</urlset>"""
+app.config['SECRET_KEY'] = secrets.token_hex(16)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
+app.config['ALLOWED_EXTENSIONS'] = {'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'mp4', 'mp3', 'zip', 'docx'}
 
-HTML_TEMPLATE = '''
-<!DOCTYPE html>
-<html dir="rtl" lang="ar">
-<head>
-    <!-- ضع هذه الأسطر في بداية <head> -->
-    <meta name="description" content="Mocat - تطبيق دردشة آمن وسريع مع تشفير كامل">
-    <meta name="keywords" content="Mocat, تطبيق دردشة, دردشة آمنة, تطبيق عربي">
-    <meta name="google-site-verification" content="620d181fa7a7ee21">
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# ============ قاعدة البيانات في الذاكرة ============
+users_files = {}  # {username: [file1, file2]}
+files_db = []     # تخزين جميع الملفات
+global_chat = []  # المحادثة العالمية
+
+# الكلمات الممنوعة في الوصف
+BANNED_WORDS = ['سيء', 'ممنوع', 'خطر', 'غير لائق']
+
+# أيقونات الملفات
+FILE_ICONS = {
+    'pdf': '📄', 'txt': '📋', 'doc': '📄', 'docx': '📄',
+    'png': '🖼️', 'jpg': '🖼️', 'jpeg': '🖼️', 'gif': '🖼️',
+    'mp4': '🎬', 'avi': '🎬', 'mov': '🎬',
+    'mp3': '🎵', 'wav': '🎵',
+    'zip': '📦', 'rar': '📦'
+}
+
+# ============ دوال مساعدة ============
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+
+def get_file_icon(filename):
+    ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else 'unknown'
+    return FILE_ICONS.get(ext, '📄')
+
+def check_banned_words(text):
+    for word in BANNED_WORDS:
+        if word in text.lower():
+            return True, f"كلمة '{word}' غير مسموحة"
+    return False, ""
+
+def get_user_avatar(username):
+    if username:
+        return username[0].upper()
+    return "?"
+
+def get_user_color(username):
+    colors = ['#4361ee', '#3a0ca3', '#7209b7', '#f72585', '#4cc9f0']
+    hash_val = sum(ord(char) for char in username) if username else 0
+    return colors[hash_val % len(colors)]
+
+# ============ Routes ============
+@app.route('/')
+def index():
+    return render_template_string(TEMPLATE, files=files_db, chat_messages=global_chat[-10:])
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'لم يتم اختيار ملف'}), 400
+        
+        file = request.files['file']
+        username = request.form.get('username', 'مجهول').strip()
+        description = request.form.get('description', '').strip()
+        
+        if not username:
+            return jsonify({'error': 'الرجاء إدخال الاسم'}), 400
+        
+        if not file or file.filename == '':
+            return jsonify({'error': 'الرجاء اختيار ملف'}), 400
+        
+        if not allowed_file(file.filename):
+            return jsonify({'error': 'نوع الملف غير مسموح'}), 400
+        
+        # التحقق من عدد ملفات المستخدم
+        if username in users_files and len(users_files[username]) >= 5:
+            return jsonify({'error': 'تجاوزت الحد المسموح (5 ملفات لكل مستخدم)'}), 400
+        
+        # التحقق من الكلمات الممنوعة
+        has_banned, message = check_banned_words(description)
+        if has_banned:
+            return jsonify({'error': message}), 400
+        
+        # حفظ الملف
+        filename = secure_filename(file.filename)
+        file_id = secrets.token_hex(8)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
+        file.save(filepath)
+        
+        # حفظ بيانات الملف
+        file_data = {
+            'id': file_id,
+            'filename': filename,
+            'original_name': filename,
+            'username': username,
+            'description': description,
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'time_ago': 'الآن',
+            'size': os.path.getsize(filepath),
+            'icon': get_file_icon(filename),
+            'avatar': get_user_avatar(username),
+            'color': get_user_color(username),
+            'downloads': 0,
+            'comments': []
+        }
+        
+        # تحديث قواعد البيانات
+        files_db.append(file_data)
+        if username not in users_files:
+            users_files[username] = []
+        users_files[username].append(file_data)
+        
+        # إرسال تحديث للجميع
+        socketio.emit('new_file', file_data, broadcast=True)
+        
+        return jsonify({'success': True, 'file': file_data})
     
-    <!-- باقي الـ meta tags -->
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/download/<file_id>')
+def download_file(file_id):
+    for file_data in files_db:
+        if file_data['id'] == file_id:
+            file_data['downloads'] += 1
+            filename = file_data['filename']
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], f"{file_id}_{filename}")
+            
+            # تحديث للجميع
+            socketio.emit('file_updated', file_data, broadcast=True)
+            
+            if os.path.exists(filepath):
+                return send_file(filepath, as_attachment=True, download_name=filename)
+    
+    abort(404)
+
+@app.route('/api/files')
+def get_files():
+    return jsonify(files_db)
+
+@app.route('/api/file/<file_id>')
+def get_file(file_id):
+    for file_data in files_db:
+        if file_data['id'] == file_id:
+            return jsonify(file_data)
+    return jsonify({'error': 'الملف غير موجود'}), 404
+
+@app.route('/api/chat', methods=['GET', 'POST'])
+def chat():
+    if request.method == 'POST':
+        data = request.json
+        username = data.get('username', 'مجهول')
+        message = data.get('message', '').strip()
+        
+        if not message:
+            return jsonify({'error': 'الرسالة فارغة'}), 400
+        
+        chat_message = {
+            'id': secrets.token_hex(4),
+            'username': username,
+            'avatar': get_user_avatar(username),
+            'color': get_user_color(username),
+            'message': message,
+            'timestamp': datetime.now().strftime('%H:%M')
+        }
+        
+        global_chat.append(chat_message)
+        
+        # إرسال للجميع
+        socketio.emit('new_message', chat_message, broadcast=True)
+        
+        return jsonify({'success': True})
+    
+    return jsonify(global_chat[-20:])
+
+@app.route('/api/comment/<file_id>', methods=['POST'])
+def add_comment(file_id):
+    data = request.json
+    username = data.get('username', 'مجهول')
+    comment = data.get('comment', '').strip()
+    
+    if not comment:
+        return jsonify({'error': 'التعليق فارغ'}), 400
+    
+    for file_data in files_db:
+        if file_data['id'] == file_id:
+            comment_data = {
+                'id': secrets.token_hex(4),
+                'username': username,
+                'avatar': get_user_avatar(username),
+                'color': get_user_color(username),
+                'comment': comment,
+                'timestamp': datetime.now().strftime('%H:%M')
+            }
+            
+            file_data['comments'].append(comment_data)
+            
+            # تحديث للجميع
+            socketio.emit('new_comment', {
+                'file_id': file_id,
+                'comment': comment_data
+            }, broadcast=True)
+            
+            return jsonify({'success': True})
+    
+    return jsonify({'error': 'الملف غير موجود'}), 404
+
+@app.route('/api/stats/<username>')
+def get_stats(username):
+    user_files = [f for f in files_db if f['username'] == username]
+    total_size = sum(f['size'] for f in user_files)
+    
+    return jsonify({
+        'file_count': len(user_files),
+        'max_files': 5,
+        'total_size': total_size,
+        'max_size': 50 * 1024 * 1024,
+        'comments_count': sum(len(f['comments']) for f in user_files)
+    })
+
+# ============ SocketIO Events ============
+@socketio.on('connect')
+def handle_connect():
+    emit('connected', {'message': 'Connected successfully'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    print('Client disconnected')
+
+# ============ HTML Template ============
+TEMPLATE = '''
+<!DOCTYPE html>
+<html dir="rtl">
+<head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mocat - تطبيق الدردشة الآمن</title>
-     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-</head>
-   
+    <title>مشاركة الملفات</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
     <style>
-        /* الأساسيات */
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
-            transition: all 0.3s ease;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         
         body {
-            font-family: system-ui, sans-serif;
-            background: #0f172a;
-            color: #f1f5f9;
-            line-height: 1.6;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+            padding-bottom: 100px;
         }
         
-        body.theme-white {
-            background: #ffffff;
-            color: #1f2937;
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
         }
         
-        /* الهيدر مع الصورة - أكثر شفافية */
         .header {
-            height: 70vh;
-            background: linear-gradient(rgba(15, 23, 42, 0.6), rgba(15, 23, 42, 0.7)),
-                        url('https://images.unsplash.com/photo-1529156069898-49953e39b3ac?w=1600&q=80&fit=crop&crop=faces');
-            background-size: cover;
-            background-position: center;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             text-align: center;
-            position: relative;
-            animation: fadeIn 1s ease-out;
+            color: white;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            opacity: 0.9;
+        }
+        
+        /* كروت الملفات */
+        .files-list {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            margin-bottom: 100px;
+        }
+        
+        .file-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s, box-shadow 0.3s;
+            animation: fadeIn 0.5s ease-out;
         }
         
         @keyframes fadeIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
         }
         
-        body.theme-white .header {
-            background: linear-gradient(rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0.8)),
-                        url('https://images.unsplash.com/photo-1529156069898-49953e39b3ac?w=1600&q=80&fit=crop&crop=faces');
+        .file-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.15);
         }
         
-        .header-content {
-            max-width: 800px;
-            padding: 2rem;
-            animation: slideUp 1s ease-out 0.3s both;
-        }
-        
-        @keyframes slideUp {
-            from { transform: translateY(30px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
-        }
-        
-        .app-logo {
-            font-size: 4rem;
-            color: #60a5fa;
-            margin-bottom: 1rem;
-            animation: bounce 2s infinite;
-        }
-        
-        @keyframes bounce {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-10px); }
-        }
-        
-        .app-title {
-            font-size: 3rem;
-            color: white;
-            margin-bottom: 1rem;
-            animation: fadeIn 1.5s ease-out 0.5s both;
-        }
-        
-        body.theme-white .app-title {
-            color: #1f2937;
-        }
-        
-        .app-tagline {
-            font-size: 1.2rem;
-            color: #cbd5e1;
-            max-width: 600px;
-            margin: 0 auto;
-            animation: fadeIn 1.5s ease-out 0.7s both;
-        }
-        
-        body.theme-white .app-tagline {
-            color: #4b5563;
-        }
-        
-        /* التنقل */
-        .nav {
-            background: rgba(30, 41, 59, 0.95);
-            padding: 1rem 2rem;
-            display: flex;
-            justify-content: center;
-            gap: 2rem;
-            position: sticky;
-            top: 0;
-            z-index: 100;
-            backdrop-filter: blur(10px);
-            animation: slideDown 0.5s ease-out;
-        }
-        
-        @keyframes slideDown {
-            from { transform: translateY(-100%); }
-            to { transform: translateY(0); }
-        }
-        
-        body.theme-white .nav {
-            background: rgba(255, 255, 255, 0.95);
-        }
-        
-        .nav-btn {
-            background: none;
-            border: none;
-            color: #cbd5e1;
-            font-size: 1rem;
-            cursor: pointer;
-            padding: 0.5rem 1rem;
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-        
-        body.theme-white .nav-btn {
-            color: #6b7280;
-        }
-        
-        .nav-btn:hover {
-            background: rgba(255, 255, 255, 0.1);
-            color: white;
-            transform: translateY(-2px);
-        }
-        
-        body.theme-white .nav-btn:hover {
-            background: rgba(0, 0, 0, 0.05);
-            color: #1f2937;
-        }
-        
-        /* المحتوى */
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 0 2rem;
-        }
-        
-        .section {
-            padding: 4rem 0;
-            border-bottom: 1px solid #334155;
-            opacity: 0;
-            transform: translateY(20px);
-            animation: fadeInUp 0.8s ease-out forwards;
-        }
-        
-        @keyframes fadeInUp {
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        
-        .section:nth-child(1) { animation-delay: 0.2s; }
-        .section:nth-child(2) { animation-delay: 0.4s; }
-        .section:nth-child(3) { animation-delay: 0.6s; }
-        .section:nth-child(4) { animation-delay: 0.8s; }
-        
-        body.theme-white .section {
-            border-bottom: 1px solid #e5e7eb;
-        }
-        
-        .section-title {
-            font-size: 2rem;
-            color: #60a5fa;
-            margin-bottom: 2rem;
-            text-align: center;
-        }
-        
-        body.theme-white .section-title {
-            color: #1d4ed8;
-        }
-        
-        /* المميزات */
-        .features-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 2rem;
-            margin-top: 2rem;
-        }
-        
-        .feature-card {
-            background: #1e293b;
-            padding: 2rem;
-            border-radius: 12px;
-            border: 1px solid #334155;
-            opacity: 0;
-            transform: translateY(20px);
-            animation: fadeInUp 0.6s ease-out forwards;
-        }
-        
-        .feature-card:nth-child(1) { animation-delay: 0.3s; }
-        .feature-card:nth-child(2) { animation-delay: 0.4s; }
-        .feature-card:nth-child(3) { animation-delay: 0.5s; }
-        .feature-card:nth-child(4) { animation-delay: 0.6s; }
-        .feature-card:nth-child(5) { animation-delay: 0.7s; }
-        .feature-card:nth-child(6) { animation-delay: 0.8s; }
-        
-        body.theme-white .feature-card {
-            background: #f9fafb;
-            border: 1px solid #e5e7eb;
-        }
-        
-        .feature-card:hover {
-            transform: translateY(-5px) scale(1.02);
-            border-color: #60a5fa;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
-        }
-        
-        .feature-icon {
-            font-size: 2rem;
-            color: #60a5fa;
-            margin-bottom: 1rem;
-        }
-        
-        /* الأسئلة الشائعة */
-        .faq-grid {
-            max-width: 800px;
-            margin: 0 auto;
-        }
-        
-        .faq-item {
-            background: #1e293b;
-            border-radius: 10px;
-            margin-bottom: 1rem;
-            overflow: hidden;
-            border: 1px solid #334155;
-            animation: fadeInUp 0.6s ease-out forwards;
-        }
-        
-        .faq-item:nth-child(1) { animation-delay: 0.3s; }
-        .faq-item:nth-child(2) { animation-delay: 0.4s; }
-        .faq-item:nth-child(3) { animation-delay: 0.5s; }
-        .faq-item:nth-child(4) { animation-delay: 0.6s; }
-        
-        body.theme-white .faq-item {
-            background: #f9fafb;
-            border: 1px solid #e5e7eb;
-        }
-        
-        .faq-question {
-            padding: 1.5rem;
-            cursor: pointer;
+        .file-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            background: #1e293b;
-            transition: all 0.3s ease;
+            margin-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+            padding-bottom: 10px;
         }
         
-        body.theme-white .faq-question {
-            background: #f9fafb;
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
         
-        .faq-question:hover {
-            background: #334155;
+        .user-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 18px;
         }
         
-        body.theme-white .faq-question:hover {
-            background: #e5e7eb;
+        .user-name {
+            font-weight: bold;
+            color: #333;
         }
         
-        .faq-answer {
-            padding: 1.5rem;
-            border-top: 1px solid #334155;
+        .time-ago {
+            color: #888;
+            font-size: 0.9rem;
+        }
+        
+        .file-name {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 1.2rem;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .file-icon {
+            font-size: 1.5rem;
+        }
+        
+        .file-actions {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .btn {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 10px;
+            font-weight: bold;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.3s;
+            font-size: 0.9rem;
+        }
+        
+        .btn-download {
+            background: #4361ee;
+            color: white;
+        }
+        
+        .btn-download:hover {
+            background: #3a0ca3;
+        }
+        
+        .btn-comments {
+            background: #f0f0f0;
+            color: #333;
+        }
+        
+        .btn-comments:hover {
+            background: #ddd;
+        }
+        
+        .btn-description {
+            background: #4cc9f0;
+            color: white;
+        }
+        
+        .btn-description:hover {
+            background: #3a86ff;
+        }
+        
+        .description-box {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            border-right: 4px solid #4cc9f0;
             display: none;
-            background: #0f172a;
-            animation: slideDownAnswer 0.3s ease-out;
         }
         
-        @keyframes slideDownAnswer {
-            from { 
-                opacity: 0;
-                transform: translateY(-10px);
-            }
-            to { 
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        
-        body.theme-white .faq-answer {
-            border-top: 1px solid #e5e7eb;
-            background: #ffffff;
-        }
-        
-        /* المطورون - صورة جديدة لأشخاص مبسوطين */
-        .developers-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 2rem;
-        }
-        
-        .developer-card {
-            text-align: center;
-            padding: 2rem;
-            background: #1e293b;
-            border-radius: 12px;
-            border: 1px solid #334155;
-            animation: fadeInUp 0.6s ease-out forwards;
-        }
-        
-        .developer-card:nth-child(1) { animation-delay: 0.3s; }
-        .developer-card:nth-child(2) { animation-delay: 0.4s; }
-        .developer-card:nth-child(3) { animation-delay: 0.5s; }
-        
-        body.theme-white .developer-card {
-            background: #f9fafb;
-            border: 1px solid #e5e7eb;
-        }
-        
-        .dev-icon {
-            font-size: 3rem;
-            color: #60a5fa;
-            margin-bottom: 1rem;
-        }
-        
-        /* الإعدادات */
-        .settings-modal {
-            display: none;
+        /* نافذة الرفع */
+        .upload-overlay {
             position: fixed;
             top: 0;
             left: 0;
             right: 0;
             bottom: 0;
             background: rgba(0, 0, 0, 0.8);
-            z-index: 1000;
+            display: none;
             align-items: center;
             justify-content: center;
-            animation: fadeIn 0.3s ease;
+            z-index: 1000;
         }
         
-        .settings-content {
-            background: #1e293b;
-            padding: 2rem;
-            border-radius: 15px;
+        .upload-modal {
+            background: white;
+            border-radius: 20px;
             width: 90%;
             max-width: 500px;
-            max-height: 80vh;
-            overflow-y: auto;
-            border: 1px solid #334155;
-            animation: slideUp 0.3s ease;
+            padding: 30px;
+            animation: modalSlide 0.3s ease-out;
         }
         
-        body.theme-white .settings-content {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
+        @keyframes modalSlide {
+            from { transform: translateY(-50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
         }
         
-        .settings-section {
-            margin-bottom: 2rem;
+        .modal-header {
+            text-align: center;
+            margin-bottom: 25px;
         }
         
-        .setting-item {
-            padding: 1rem;
-            background: #0f172a;
-            border-radius: 8px;
-            margin-bottom: 1rem;
-            border: 1px solid #334155;
+        .modal-header h2 {
+            color: #4361ee;
+            margin-bottom: 10px;
         }
         
-        body.theme-white .setting-item {
-            background: #f9fafb;
-            border: 1px solid #e5e7eb;
-        }
-        
-        /* أزرار التحديد - زرين فقط */
-        .theme-buttons {
+        .steps {
             display: flex;
-            gap: 1rem;
-            margin-top: 0.5rem;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 25px;
         }
         
-        .theme-btn {
-            padding: 0.8rem 1.5rem;
-            border-radius: 8px;
-            cursor: pointer;
-            border: 2px solid transparent;
-            background: #1e293b;
-            color: white;
-            flex: 1;
-            text-align: center;
-            font-weight: bold;
-            transition: all 0.3s ease;
-        }
-        
-        .theme-btn.active {
-            border-color: #60a5fa;
-            background: rgba(96, 165, 250, 0.2);
-            transform: scale(1.05);
-            box-shadow: 0 4px 12px rgba(96, 165, 250, 0.3);
-        }
-        
-        body.theme-white .theme-btn {
-            background: #f3f4f6;
-            color: #1f2937;
-        }
-        
-        body.theme-white .theme-btn.active {
-            border-color: #1d4ed8;
-            background: rgba(29, 78, 216, 0.1);
-            box-shadow: 0 4px 12px rgba(29, 78, 216, 0.2);
-        }
-        
-        .lang-buttons {
+        .step {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
             display: flex;
-            gap: 1rem;
-            margin-top: 0.5rem;
-        }
-        
-        .lang-btn {
-            padding: 0.8rem 1.5rem;
-            border-radius: 8px;
-            cursor: pointer;
-            border: 2px solid transparent;
-            background: #1e293b;
-            color: white;
-            flex: 1;
-            text-align: center;
-            font-weight: bold;
-            transition: all 0.3s ease;
-        }
-        
-        .lang-btn.active {
-            border-color: #60a5fa;
-            background: rgba(96, 165, 250, 0.2);
-            transform: scale(1.05);
-            box-shadow: 0 4px 12px rgba(96, 165, 250, 0.3);
-        }
-        
-        body.theme-white .lang-btn {
-            background: #f3f4f6;
-            color: #1f2937;
-        }
-        
-        body.theme-white .lang-btn.active {
-            border-color: #1d4ed8;
-            background: rgba(29, 78, 216, 0.1);
-            box-shadow: 0 4px 12px rgba(29, 78, 216, 0.2);
-        }
-        
-        /* زر التحميل */
-        .download-section {
-            text-align: center;
-            padding: 3rem;
-            background: linear-gradient(135deg, #1e40af, #3b82f6);
-            border-radius: 20px;
-            margin: 3rem 0;
-            animation: pulse 2s infinite;
-        }
-        
-        @keyframes pulse {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.02); }
-            100% { transform: scale(1); }
-        }
-        
-        .download-btn {
-            background: white;
-            color: #1e40af;
-            border: none;
-            padding: 1rem 2rem;
-            font-size: 1.2rem;
-            border-radius: 10px;
-            cursor: pointer;
-            display: inline-flex;
             align-items: center;
-            gap: 10px;
+            justify-content: center;
             font-weight: bold;
-            margin-top: 1rem;
-            transition: all 0.3s ease;
+            color: white;
+            background: #ddd;
         }
         
-        .download-btn:hover {
-            background: #f8fafc;
-            transform: translateY(-3px) scale(1.05);
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+        .step.active {
+            background: #4361ee;
         }
         
-        /* التذييل */
-        footer {
+        .step.completed {
+            background: #2a9d8f;
+        }
+        
+        .form-group {
+            margin-bottom: 20px;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #555;
+        }
+        
+        .form-control {
+            width: 100%;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 1rem;
+            transition: border-color 0.3s;
+        }
+        
+        .form-control:focus {
+            outline: none;
+            border-color: #4361ee;
+        }
+        
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+            width: 100%;
+        }
+        
+        .file-input-wrapper input[type=file] {
+            position: absolute;
+            left: 0;
+            top: 0;
+            opacity: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+        }
+        
+        .file-input-label {
+            display: block;
+            padding: 15px;
+            background: #f0f0f0;
+            border-radius: 10px;
             text-align: center;
-            padding: 3rem;
-            color: #94a3b8;
-            border-top: 1px solid #334155;
-            margin-top: 4rem;
-            animation: fadeIn 1s ease-out 1s both;
+            cursor: pointer;
+            border: 2px dashed #ccc;
+            transition: all 0.3s;
         }
         
-        body.theme-white footer {
-            color: #6b7280;
-            border-top: 1px solid #e5e7eb;
+        .file-input-label:hover {
+            background: #e0e0e0;
+            border-color: #4361ee;
         }
         
-        /* التجاوبية */
-        @media (max-width: 768px) {
-            .header {
-                height: 60vh;
-            }
-            
-            .app-title {
-                font-size: 2rem;
-            }
-            
-            .nav {
-                padding: 1rem;
-                gap: 1rem;
-            }
-            
-            .nav-btn span {
-                display: none;
-            }
-            
-            .container {
-                padding: 0 1rem;
-            }
-            
-            .section {
-                padding: 3rem 0;
-            }
-            
-            .theme-buttons, .lang-buttons {
-                flex-direction: column;
-            }
+        .error-message {
+            color: #e63946;
+            background: #ffeaea;
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 10px;
+            display: none;
+        }
+        
+        .success-message {
+            color: #2a9d8f;
+            background: #e8f4f3;
+            padding: 10px;
+            border-radius: 8px;
+            margin-top: 10px;
+            display: none;
+        }
+        
+        .modal-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 25px;
+        }
+        
+        .modal-buttons .btn {
+            flex: 1;
+        }
+        
+        .btn-primary {
+            background: #4361ee;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #3a0ca3;
+        }
+        
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+        
+        .btn-secondary:hover {
+            background: #ddd;
+        }
+        
+        /* البار السفلي */
+        .bottom-nav {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: white;
+            display: flex;
+            justify-content: space-around;
+            padding: 15px 0;
+            box-shadow: 0 -5px 20px rgba(0, 0, 0, 0.1);
+            z-index: 100;
+        }
+        
+        .nav-btn {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 5px;
+            background: none;
+            border: none;
+            color: #888;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: color 0.3s;
+            padding: 10px 20px;
+            border-radius: 50px;
+        }
+        
+        .nav-btn:hover {
+            color: #4361ee;
+            background: #f0f0f0;
+        }
+        
+        .nav-btn.active {
+            color: #4361ee;
+            font-weight: bold;
+        }
+        
+        .nav-btn i {
+            font-size: 1.5rem;
+        }
+        
+        /* نافذة المحادثة */
+        .chat-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        
+        .chat-modal {
+            background: white;
+            border-radius: 20px;
+            width: 90%;
+            max-width: 500px;
+            height: 80vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .chat-header {
+            padding: 20px;
+            border-bottom: 2px solid #f0f0f0;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        .message {
+            padding: 12px 15px;
+            border-radius: 15px;
+            max-width: 80%;
+            position: relative;
+        }
+        
+        .message.sent {
+            background: #4361ee;
+            color: white;
+            align-self: flex-end;
+            border-bottom-right-radius: 5px;
+        }
+        
+        .message.received {
+            background: #f0f0f0;
+            color: #333;
+            align-self: flex-start;
+            border-bottom-left-radius: 5px;
+        }
+        
+        .message-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+        }
+        
+        .chat-input-area {
+            padding: 15px;
+            border-top: 2px solid #f0f0f0;
+            display: flex;
+            gap: 10px;
+        }
+        
+        .chat-input {
+            flex: 1;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 25px;
+            font-size: 1rem;
+        }
+        
+        .chat-input:focus {
+            outline: none;
+            border-color: #4361ee;
+        }
+        
+        .btn-send {
+            background: #4361ee;
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        
+        .btn-send:hover {
+            background: #3a0ca3;
+        }
+        
+        /* التحميل */
+        .loading {
+            text-align: center;
+            padding: 30px;
+            color: #666;
+        }
+        
+        /* رسائل النظام */
+        .system-message {
+            text-align: center;
+            padding: 10px;
+            background: #e8f4f3;
+            color: #2a9d8f;
+            border-radius: 10px;
+            margin: 10px 0;
+            font-size: 0.9rem;
         }
     </style>
 </head>
 <body>
-    <!-- الهيدر مع الصورة الجديدة -->
-    <header class="header">
-        <div class="header-content">
-            <div class="app-logo">
-                <i class="fas fa-comment-dots"></i>
-            </div>
-            <h1 class="app-title" id="appTitle">Mocat</h1>
-            <p class="app-tagline" id="appTagline">
-                تطبيق دردشة آمن وسريع. تواصل مع أصدقائك بخصوصية تامة وحماية متقدمة.
-            </p>
-        </div>
-    </header>
-
-    <!-- التنقل -->
-    <nav class="nav">
-        <button class="nav-btn" onclick="scrollToSection('features')">
-            <i class="fas fa-star"></i>
-            <span id="navFeatures">المميزات</span>
-        </button>
-        <button class="nav-btn" onclick="scrollToSection('developers')">
-            <i class="fas fa-users"></i>
-            <span id="navDevelopers">المطورون</span>
-        </button>
-        <button class="nav-btn" onclick="scrollToSection('security')">
-            <i class="fas fa-shield-alt"></i>
-            <span id="navSecurity">الأمان</span>
-        </button>
-        <button class="nav-btn" onclick="openSettings()">
-            <i class="fas fa-cog"></i>
-            <span id="navSettings">الإعدادات</span>
-        </button>
-        <button class="nav-btn" onclick="openFAQ()">
-            <i class="fas fa-question-circle"></i>
-            <span id="navFAQ">أسئلة شائعة</span>
-        </button>
-    </nav>
-
-    <!-- المحتوى الرئيسي -->
     <div class="container">
-        <!-- مميزات -->
-        <section id="features" class="section">
-            <h2 class="section-title" id="featuresTitle">مميزات التطبيق</h2>
-            <div class="features-grid">
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-lock"></i>
+        <div class="header">
+            <h1><i class="fas fa-share-alt"></i> مشاركة الملفات</h1>
+            <p>شارك ملفاتك مع الآخرين بسهولة وأمان</p>
+        </div>
+        
+        <div class="files-list" id="filesList">
+            {% for file in files %}
+            <div class="file-card" id="file-{{ file.id }}">
+                <div class="file-header">
+                    <div class="user-info">
+                        <div class="user-avatar" style="background-color: {{ file.color }};">
+                            {{ file.avatar }}
+                        </div>
+                        <div>
+                            <div class="user-name">{{ file.username }}</div>
+                            <div class="time-ago">{{ file.time_ago }}</div>
+                        </div>
                     </div>
-                    <h3 id="feature1Title">تشفير كامل</h3>
-                    <p id="feature1Desc">جميع المحادثات مشفرة من البداية إلى النهاية. لا يمكن لأي شخص قراءة رسائلك، حتى نحن.</p>
+                    <div class="file-size">{{ (file.size / 1024 / 1024)|round(2) }} MB</div>
                 </div>
                 
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-bolt"></i>
-                    </div>
-                    <h3 id="feature2Title">سرعة عالية</h3>
-                    <p id="feature2Desc">إرسال واستقبال الرسائل فورياً بدون تأخير. واجهة سريعة تستجيب فوراً لأي أمر.</p>
+                <div class="file-name">
+                    <span class="file-icon">{{ file.icon }}</span>
+                    <span>{{ file.filename }}</span>
                 </div>
                 
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-user-group"></i>
-                    </div>
-                    <h3 id="feature3Title">مجموعات ذكية</h3>
-                    <p id="feature3Desc">أنشئ مجموعات دردشة مع أصدقائك. أدوات إدارة متقدمة وسهلة الاستخدام.</p>
+                <div class="file-actions">
+                    <button class="btn btn-download" onclick="downloadFile('{{ file.id }}', '{{ file.filename }}')">
+                        <i class="fas fa-download"></i> تنزيل ({{ file.downloads }})
+                    </button>
+                    <button class="btn btn-comments" onclick="showComments('{{ file.id }}')">
+                        <i class="fas fa-comment"></i> تعليقات ({{ file.comments|length }})
+                    </button>
+                    <button class="btn btn-description" onclick="toggleDescription('{{ file.id }}')">
+                        <i class="fas fa-info-circle"></i> وصف
+                    </button>
                 </div>
                 
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-image"></i>
-                    </div>
-                    <h3 id="feature4Title">مشاركة الوسائط</h3>
-                    <p id="feature4Desc">شارك الصور والفيديوهات والملفات بسهولة. دعم لكافة الصيغ الشائعة.</p>
-                </div>
-                
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-moon"></i>
-                    </div>
-                    <h3 id="feature5Title">وضع ليلي</h3>
-                    <p id="feature5Desc">وضع مظلم مريح للعين أثناء الليل. يتكامل مع نظام الجهاز تلقائياً.</p>
-                </div>
-                
-                <div class="feature-card">
-                    <div class="feature-icon">
-                        <i class="fas fa-language"></i>
-                    </div>
-                    <h3 id="feature6Title">دعم عربي كامل</h3>
-                    <p id="feature6Desc">واجهة باللغة العربية مع دعم كامل للحروف والاتجاه. مناسب للمستخدم العربي.</p>
+                <div class="description-box" id="desc-{{ file.id }}">
+                    <p>{{ file.description }}</p>
                 </div>
             </div>
-        </section>
-
-        <!-- الأمان -->
-        <section id="security" class="section">
-            <h2 class="section-title" id="securityTitle">نظام الأمان المتقدم</h2>
-            <div class="features-grid">
-                <div class="feature-card">
-                    <h3 id="security1Title">حماية البيانات</h3>
-                    <p id="security1Desc">بياناتك تبقى على جهازك ولا نرسلها إلى سيرفرات خارجية. هذا يعني خصوصية كاملة.</p>
-                </div>
-                
-                <div class="feature-card">
-                    <h3 id="security2Title">هل سمعت من قبل عن اختراق؟</h3>
-                    <p id="security2Desc">لا داعي للقلق. نظامنا مبني على أساس عدم تخزين بيانات حساسة. لا توجد قاعدة بيانات مركزية يمكن اختراقها.</p>
-                </div>
-                
-                <div class="feature-card">
-                    <h3 id="security3Title">التحكم في الصلاحيات</h3>
-                    <p id="security3Desc">أنت تتحكم كاملاً في الصلاحيات. التطبيق لا يطلب صلاحيات غير ضرورية.</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- المطورون -->
-        <section id="developers" class="section">
-            <h2 class="section-title" id="developersTitle">فريق التطوير</h2>
-            <div class="developers-grid">
-                <div class="developer-card">
-                    <div class="dev-icon">
-                        <i class="fas fa-code"></i>
-                    </div>
-                    <h3 id="dev1Title">مطورون متمرسون</h3>
-                    <p id="dev1Desc">فريق من المطورين المتخصصين في برمجة تطبيقات التواصل والأمان.</p>
-                </div>
-                
-                <div class="developer-card">
-                    <div class="dev-icon">
-                        <i class="fas fa-palette"></i>
-                    </div>
-                    <h3 id="dev2Title">مصممو واجهات</h3>
-                    <p id="dev2Desc">مصممون محترفون يهتمون بتجربة المستخدم وسهولة الاستخدام.</p>
-                </div>
-                
-                <div class="developer-card">
-                    <div class="dev-icon">
-                        <i class="fas fa-shield-alt"></i>
-                    </div>
-                    <h3 id="dev3Title">خبراء أمان</h3>
-                    <p id="dev3Desc">متخصصون في أمن المعلومات وحماية البيانات الرقمية.</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- الأسئلة الشائعة -->
-        <section id="faq" class="section">
-            <h2 class="section-title" id="faqTitle">أسئلة شائعة</h2>
-            <div class="faq-grid">
-                <div class="faq-item">
-                    <div class="faq-question" onclick="toggleFAQ(1)">
-                        <span id="faq1Question">كيف يعمل تطبيق Mocat؟</span>
-                        <i class="fas fa-chevron-down"></i>
-                    </div>
-                    <div class="faq-answer" id="faq1Answer">
-                        <p id="faq1AnswerText">التطبيق يسمح لك بإنشاء حساب، إضافة أصدقاء، وإنشاء محادثات فردية أو جماعية. جميع الرسائل ترسل مشفرة وتظهر فوراً للمستقبل.</p>
-                    </div>
-                </div>
-                
-                <div class="faq-item">
-                    <div class="faq-question" onclick="toggleFAQ(2)">
-                        <span id="faq2Question">هل المحادثات آمنة حقاً؟</span>
-                        <i class="fas fa-chevron-down"></i>
-                    </div>
-                    <div class="faq-answer" id="faq2Answer">
-                        <p id="faq2AnswerText">نعم، نستخدم تشفير من طرف إلى طرف. هذا يعني أن الرسائل تتشفر على جهازك وتتشفر على جهاز المستقبل. لا يمكن قراءتها أثناء النقل.</p>
-                    </div>
-                </div>
-                
-                <div class="faq-item">
-                    <div class="faq-question" onclick="toggleFAQ(3)">
-                        <span id="faq3Question">ما هي مميزات التطبيق؟</span>
-                        <i class="fas fa-chevron-down"></i>
-                    </div>
-                    <div class="faq-answer" id="faq3Answer">
-                        <p id="faq3AnswerText">تطبيق Mocat يوفر تشفير كامل، سرعة عالية، مجموعات ذكية، مشاركة وسائط، وضع ليلي، ودعم عربي كامل لتجربة دردشة آمنة وسلسة.</p>
-                    </div>
-                </div>
-                
-                <div class="faq-item">
-                    <div class="faq-question" onclick="toggleFAQ(4)">
-                        <span id="faq4Question">هل يمكن اختراق التطبيق؟</span>
-                        <i class="fas fa-chevron-down"></i>
-                    </div>
-                    <div class="faq-answer" id="faq4Answer">
-                        <p id="faq4AnswerText">النظام مبني على مبدأ الأمان أولاً. لا نخزن بيانات حساسة على سيرفرات مركزية. حتى لو تم اختراق السيرفر، لن تصل للمحادثات لأنها مشفرة.</p>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <!-- التحميل -->
-        <section class="download-section">
-            <h2 style="font-size: 2rem; margin-bottom: 1rem;" id="downloadTitle">جاهز للبدء؟</h2>
-            <p style="font-size: 1.1rem; margin-bottom: 1rem;" id="downloadDesc">حمل Mocat الآن وابدأ الدردشة الآمنة</p>
-            <button class="download-btn" onclick="downloadApp()">
-                <i class="fas fa-download"></i> <span id="downloadBtn">تحميل التطبيق</span>
-            </button>
-        </section>
+            {% endfor %}
+        </div>
+        
+        <div class="loading" id="loading" style="display: none;">
+            <i class="fas fa-spinner fa-spin"></i> جاري التحميل...
+        </div>
     </div>
-
-    <!-- التذييل -->
-    <footer>
-        <p id="footerText">Mocat &copy; 2024 - تطبيق دردشة آمن</p>
-        <p style="margin-top: 1rem; font-size: 0.9rem; color: #64748b;" id="footerSubtext">
-            مصمم بحب لتوفير تواصل آمن للجميع
-        </p>
-    </footer>
-
-    <!-- نافذة الإعدادات -->
-    <div id="settingsModal" class="settings-modal">
-        <div class="settings-content">
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem;">
-                <h2 style="color: #60a5fa;">
-                    <i class="fas fa-cog"></i> <span id="settingsTitle">إعدادات التطبيق</span>
-                </h2>
-                <button onclick="closeSettings()" style="background: none; border: none; color: #94a3b8; font-size: 1.5rem; cursor: pointer;">
-                    ×
+    
+    <!-- نافذة رفع الملف -->
+    <div class="upload-overlay" id="uploadOverlay">
+        <div class="upload-modal">
+            <div class="modal-header">
+                <h2><i class="fas fa-cloud-upload-alt"></i> رفع ملف جديد</h2>
+                <p>شارك ملفك مع الآخرين</p>
+            </div>
+            
+            <div class="steps">
+                <div class="step active" id="step1">1</div>
+                <div class="step" id="step2">2</div>
+            </div>
+            
+            <div id="step1Content">
+                <div class="form-group">
+                    <label for="username"><i class="fas fa-user"></i> اسمك</label>
+                    <input type="text" id="username" class="form-control" placeholder="أدخل اسمك" value="مستخدم">
+                </div>
+                
+                <div class="form-group">
+                    <label for="file"><i class="fas fa-file"></i> اختر الملف</label>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="file" class="form-control" onchange="updateFileName()">
+                        <div class="file-input-label" id="fileLabel">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            <span>انقر لاختيار الملف</span>
+                            <div style="font-size: 0.9rem; margin-top: 5px; color: #666;">
+                                الحد الأقصى: 50MB | 5 ملفات لكل مستخدم
+                            </div>
+                        </div>
+                    </div>
+                    <div id="fileName" style="margin-top: 10px; color: #666;"></div>
+                </div>
+                
+                <div class="error-message" id="step1Error"></div>
+                
+                <div class="modal-buttons">
+                    <button class="btn btn-secondary" onclick="closeUploadModal()">إلغاء</button>
+                    <button class="btn btn-primary" onclick="nextStep()">التالي <i class="fas fa-arrow-left"></i></button>
+                </div>
+            </div>
+            
+            <div id="step2Content" style="display: none;">
+                <div class="form-group">
+                    <label for="description"><i class="fas fa-edit"></i> وصف الملف</label>
+                    <textarea id="description" class="form-control" rows="4" placeholder="اكتب وصفًا للملف..."></textarea>
+                    <div style="font-size: 0.9rem; color: #666; margin-top: 5px;">
+                        تجنب الكلمات المخالفة للسياسة
+                    </div>
+                </div>
+                
+                <div class="form-group">
+                    <div class="file-info" style="background: #f8f9fa; padding: 15px; border-radius: 10px;">
+                        <strong>ملخص الملف:</strong>
+                        <div id="fileSummary"></div>
+                    </div>
+                </div>
+                
+                <div class="error-message" id="step2Error"></div>
+                <div class="success-message" id="successMessage"></div>
+                
+                <div class="modal-buttons">
+                    <button class="btn btn-secondary" onclick="prevStep()">رجوع <i class="fas fa-arrow-right"></i></button>
+                    <button class="btn btn-primary" onclick="uploadFile()" id="uploadBtn">
+                        <i class="fas fa-upload"></i> رفع الملف
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- نافذة المحادثة -->
+    <div class="chat-overlay" id="chatOverlay">
+        <div class="chat-modal">
+            <div class="chat-header">
+                <h2><i class="fas fa-comments"></i> المحادثة العالمية</h2>
+                <button onclick="closeChatModal()" style="background: none; border: none; font-size: 1.5rem; cursor: pointer;">✕</button>
+            </div>
+            
+            <div class="chat-messages" id="chatMessages">
+                {% for msg in chat_messages %}
+                <div class="message {% if msg.username == 'مستخدم' %}sent{% else %}received{% endif %}">
+                    <div class="message-header">
+                        <div class="user-avatar" style="width: 25px; height: 25px; font-size: 12px; background-color: {{ msg.color }};">
+                            {{ msg.avatar }}
+                        </div>
+                        <strong>{{ msg.username }}</strong>
+                        <span style="font-size: 0.8rem; opacity: 0.7;">{{ msg.timestamp }}</span>
+                    </div>
+                    <div>{{ msg.message }}</div>
+                </div>
+                {% endfor %}
+            </div>
+            
+            <div class="chat-input-area">
+                <input type="text" class="chat-input" id="chatInput" placeholder="اكتب رسالة..." onkeypress="if(event.key == 'Enter') sendMessage()">
+                <button class="btn-send" onclick="sendMessage()">
+                    <i class="fas fa-paper-plane"></i>
                 </button>
             </div>
-            
-            <div class="settings-section">
-                <h3 style="margin-bottom: 1rem; color: #cbd5e1;">
-                    <i class="fas fa-info-circle"></i> <span id="infoTitle">معلومات التطبيق</span>
-                </h3>
-                <div class="setting-item">
-                    <strong id="appNameLabel">اسم التطبيق:</strong> Mocat<br>
-                    <strong id="versionLabel">الإصدار:</strong> 1.0.0<br>
-                    <strong id="typeLabel">النوع:</strong> <span id="appType">تطبيق دردشة</span><br>
-                    <strong id="statusLabel">الحالة:</strong> <span id="appStatus">تحت التطوير</span>
-                </div>
-            </div>
-            
-            <div class="settings-section">
-                <h3 style="margin-bottom: 1rem; color: #cbd5e1;">
-                    <i class="fas fa-palette"></i> <span id="themeTitle">المظهر</span>
-                </h3>
-                <div class="setting-item">
-                    <div class="theme-buttons">
-                        <button id="themeDark" class="theme-btn active" onclick="changeTheme('dark')">
-                            داكن
-                        </button>
-                        <button id="themeWhite" class="theme-btn" onclick="changeTheme('white')">
-                            فاتح
-                        </button>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="settings-section">
-                <h3 style="margin-bottom: 1rem; color: #cbd5e1;">
-                    <i class="fas fa-language"></i> <span id="languageTitle">اللغة</span>
-                </h3>
-                <div class="setting-item">
-                    <div class="lang-buttons">
-                        <button id="langAr" class="lang-btn active" onclick="changeLanguage('ar')">
-                            العربية
-                        </button>
-                        <button id="langEn" class="lang-btn" onclick="changeLanguage('en')">
-                            English
-                        </button>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="settings-section">
-                <h3 style="margin-bottom: 1rem; color: #cbd5e1;">
-                    <i class="fas fa-book"></i> <span id="aboutTitle">حول التطبيق</span>
-                </h3>
-                <div class="setting-item">
-                    <p style="color: #94a3b8;" id="aboutText">
-                        Mocat هو تطبيق دردشة يركز على الأمان والخصوصية. تم تطويره باستخدام تقنيات حديثة تضمن حماية بيانات المستخدمين مع توفير تجربة استخدام سلسة.
-                    </p>
-                </div>
-            </div>
         </div>
     </div>
-
+    
+    <!-- البار السفلي -->
+    <div class="bottom-nav">
+        <button class="nav-btn active" onclick="showHome()">
+            <i class="fas fa-home"></i>
+            <span>الرئيسية</span>
+        </button>
+        <button class="nav-btn" onclick="showChatModal()">
+            <i class="fas fa-comments"></i>
+            <span>المحادثة</span>
+        </button>
+        <button class="nav-btn" onclick="showUploadModal()" style="background: #4361ee; color: white; border-radius: 50%; width: 60px; height: 60px; margin-top: -20px; box-shadow: 0 5px 15px rgba(67, 97, 238, 0.4);">
+            <i class="fas fa-plus" style="font-size: 1.8rem;"></i>
+        </button>
+        <button class="nav-btn" onclick="showStats()">
+            <i class="fas fa-user"></i>
+            <span>حسابي</span>
+        </button>
+    </div>
+    
     <script>
-        // حالة التطبيق
-        let currentLanguage = 'ar';
-        let currentTheme = 'dark';
+        // SocketIO Connection
+        const socket = io();
         
-        // نصوص عربية
-        const arabicTexts = {
-            appTitle: "Mocat",
-            appTagline: "تطبيق دردشة آمن وسريع. تواصل مع أصدقائك بخصوصية تامة وحماية متقدمة.",
-            navFeatures: "المميزات",
-            navDevelopers: "المطورون",
-            navSecurity: "الأمان",
-            navSettings: "الإعدادات",
-            navFAQ: "أسئلة شائعة",
-            featuresTitle: "مميزات التطبيق",
-            feature1Title: "تشفير كامل",
-            feature1Desc: "جميع المحادثات مشفرة من البداية إلى النهاية. لا يمكن لأي شخص قراءة رسائلك، حتى نحن.",
-            feature2Title: "سرعة عالية",
-            feature2Desc: "إرسال واستقبال الرسائل فورياً بدون تأخير. واجهة سريعة تستجيب فوراً لأي أمر.",
-            feature3Title: "مجموعات ذكية",
-            feature3Desc: "أنشئ مجموعات دردشة مع أصدقائك. أدوات إدارة متقدمة وسهلة الاستخدام.",
-            feature4Title: "مشاركة الوسائط",
-            feature4Desc: "شارك الصور والفيديوهات والملفات بسهولة. دعم لكافة الصيغ الشائعة.",
-            feature5Title: "وضع ليلي",
-            feature5Desc: "وضع مظلم مريح للعين أثناء الليل. يتكامل مع نظام الجهاز تلقائياً.",
-            feature6Title: "دعم عربي كامل",
-            feature6Desc: "واجهة باللغة العربية مع دعم كامل للحروف والاتجاه. مناسب للمستخدم العربي.",
-            securityTitle: "نظام الأمان المتقدم",
-            security1Title: "حماية البيانات",
-            security1Desc: "بياناتك تبقى على جهازك ولا نرسلها إلى سيرفرات خارجية. هذا يعني خصوصية كاملة.",
-            security2Title: "هل سمعت من قبل عن اختراق؟",
-            security2Desc: "لا داعي للقلق. نظامنا مبني على أساس عدم تخزين بيانات حساسة. لا توجد قاعدة بيانات مركزية يمكن اختراقها.",
-            security3Title: "التحكم في الصلاحيات",
-            security3Desc: "أنت تتحكم كاملاً في الصلاحيات. التطبيق لا يطلب صلاحيات غير ضرورية.",
-            developersTitle: "فريق التطوير",
-            dev1Title: "مطورون متمرسون",
-            dev1Desc: "فريق من المطورين المتخصصين في برمجة تطبيقات التواصل والأمان.",
-            dev2Title: "مصممو واجهات",
-            dev2Desc: "مصممون محترفون يهتمون بتجربة المستخدم وسهولة الاستخدام.",
-            dev3Title: "خبراء أمان",
-            dev3Desc: "متخصصون في أمن المعلومات وحماية البيانات الرقمية.",
-            faqTitle: "أسئلة شائعة",
-            faq1Question: "كيف يعمل تطبيق Mocat؟",
-            faq1AnswerText: "التطبيق يسمح لك بإنشاء حساب، إضافة أصدقاء، وإنشاء محادثات فردية أو جماعية. جميع الرسائل ترسل مشفرة وتظهر فوراً للمستقبل.",
-            faq2Question: "هل المحادثات آمنة حقاً؟",
-            faq2AnswerText: "نعم، نستخدم تشفير من طرف إلى طرف. هذا يعني أن الرسائل تتشفر على جهازك وتتشفر على جهاز المستقبل. لا يمكن قراءتها أثناء النقل.",
-            faq3Question: "ما هي مميزات التطبيق؟",
-            faq3AnswerText: "تطبيق Mocat يوفر تشفير كامل، سرعة عالية، مجموعات ذكية، مشاركة وسائط، وضع ليلي، ودعم عربي كامل لتجربة دردشة آمنة وسلسة.",
-            faq4Question: "هل يمكن اختراق التطبيق؟",
-            faq4AnswerText: "النظام مبني على مبدأ الأمان أولاً. لا نخزن بيانات حساسة على سيرفرات مركزية. حتى لو تم اختراق السيرفر، لن تصل للمحادثات لأنها مشفرة.",
-            downloadTitle: "جاهز للبدء؟",
-            downloadDesc: "حمل Mocat الآن وابدأ الدردشة الآمنة",
-            downloadBtn: "تحميل التطبيق",
-            footerText: "Mocat &copy; 2024 - تطبيق دردشة آمن",
-            footerSubtext: "مصمم بحب لتوفير تواصل آمن للجميع",
-            settingsTitle: "إعدادات التطبيق",
-            infoTitle: "معلومات التطبيق",
-            appNameLabel: "اسم التطبيق:",
-            versionLabel: "الإصدار:",
-            typeLabel: "النوع:",
-            appType: "تطبيق دردشة",
-            statusLabel: "الحالة:",
-            appStatus: "تحت التطوير",
-            themeTitle: "المظهر",
-            languageTitle: "اللغة",
-            aboutTitle: "حول التطبيق",
-            aboutText: "Mocat هو تطبيق دردشة يركز على الأمان والخصوصية. تم تطويره باستخدام تقنيات حديثة تضمن حماية بيانات المستخدمين مع توفير تجربة استخدام سلسة."
-        };
-        
-        // نصوص إنجليزية
-        const englishTexts = {
-            appTitle: "Mocat",
-            appTagline: "Secure and fast chat app. Connect with your friends with complete privacy and advanced protection.",
-            navFeatures: "Features",
-            navDevelopers: "Developers",
-            navSecurity: "Security",
-            navSettings: "Settings",
-            navFAQ: "FAQ",
-            featuresTitle: "App Features",
-            feature1Title: "Full Encryption",
-            feature1Desc: "All conversations are encrypted end-to-end. No one can read your messages, not even us.",
-            feature2Title: "High Speed",
-            feature2Desc: "Send and receive messages instantly without delay. Fast interface that responds immediately to any command.",
-            feature3Title: "Smart Groups",
-            feature3Desc: "Create chat groups with your friends. Advanced and easy-to-use management tools.",
-            feature4Title: "Media Sharing",
-            feature4Desc: "Share photos, videos, and files easily. Support for all common formats.",
-            feature5Title: "Night Mode",
-            feature5Desc: "Dark mode comfortable for eyes at night. Integrates automatically with the device system.",
-            feature6Title: "Full Arabic Support",
-            feature6Desc: "Arabic interface with full support for Arabic letters and direction. Suitable for Arab users.",
-            securityTitle: "Advanced Security System",
-            security1Title: "Data Protection",
-            security1Desc: "Your data stays on your device and we don't send it to external servers. This means complete privacy.",
-            security2Title: "Ever heard of hacking?",
-            security2Desc: "No need to worry. Our system is built on the principle of not storing sensitive data. There is no central database that can be hacked.",
-            security3Title: "Permission Control",
-            security3Desc: "You have full control over permissions. The app doesn't request unnecessary permissions.",
-            developersTitle: "Development Team",
-            dev1Title: "Experienced Developers",
-            dev1Desc: "A team of developers specialized in programming communication and security applications.",
-            dev2Title: "UI Designers",
-            dev2Desc: "Professional designers who care about user experience and ease of use.",
-            dev3Title: "Security Experts",
-            dev3Desc: "Specialists in information security and digital data protection.",
-            faqTitle: "Frequently Asked Questions",
-            faq1Question: "How does Mocat app work?",
-            faq1AnswerText: "The app allows you to create an account, add friends, and create individual or group conversations. All messages are sent encrypted and appear immediately to the recipient.",
-            faq2Question: "Are conversations really secure?",
-            faq2AnswerText: "Yes, we use end-to-end encryption. This means messages are encrypted on your device and decrypted on the recipient's device. They cannot be read during transmission.",
-            faq3Question: "What are the app features?",
-            faq3AnswerText: "Mocat app provides full encryption, high speed, smart groups, media sharing, night mode, and full Arabic support for a secure and smooth chatting experience.",
-            faq4Question: "Can the app be hacked?",
-            faq4AnswerText: "The system is built on the principle of security first. We don't store sensitive data on central servers. Even if the server is hacked, conversations won't be accessed because they are encrypted.",
-            downloadTitle: "Ready to start?",
-            downloadDesc: "Download Mocat now and start secure chatting",
-            downloadBtn: "Download App",
-            footerText: "Mocat &copy; 2024 - Secure Chat App",
-            footerSubtext: "Designed with love to provide secure communication for everyone",
-            settingsTitle: "App Settings",
-            infoTitle: "App Information",
-            appNameLabel: "App Name:",
-            versionLabel: "Version:",
-            typeLabel: "Type:",
-            appType: "Chat Application",
-            statusLabel: "Status:",
-            appStatus: "Under Development",
-            themeTitle: "Appearance",
-            languageTitle: "Language",
-            aboutTitle: "About",
-            aboutText: "Mocat is a chat application that focuses on security and privacy. It was developed using modern technologies that ensure user data protection while providing a smooth user experience."
-        };
-        
-        // التمرير للأقسام
-        function scrollToSection(sectionId) {
-            const section = document.getElementById(sectionId);
-            if (section) {
-                section.scrollIntoView({ behavior: 'smooth' });
-            }
-        }
-        
-        // فتح الإعدادات
-        function openSettings() {
-            document.getElementById('settingsModal').style.display = 'flex';
-        }
-        
-        function closeSettings() {
-            document.getElementById('settingsModal').style.display = 'none';
-        }
-        
-        // فتح الأسئلة الشائعة
-        function openFAQ() {
-            scrollToSection('faq');
-        }
-        
-        // تبديل الأسئلة
-        function toggleFAQ(num) {
-            const answer = document.getElementById('faq' + num + 'Answer');
-            const icon = event.currentTarget.querySelector('i');
-            
-            if (answer.style.display === 'block') {
-                answer.style.display = 'none';
-                icon.className = 'fas fa-chevron-down';
-                answer.style.animation = 'slideUpAnswer 0.3s ease-out';
-            } else {
-                answer.style.display = 'block';
-                icon.className = 'fas fa-chevron-up';
-                answer.style.animation = 'slideDownAnswer 0.3s ease-out';
-            }
-        }
-        
-        // تغيير المظهر
-        function changeTheme(theme) {
-            // إزالة كل الثيمات
-            document.body.classList.remove('theme-white');
-            
-            // إزالة الكلاس النشط من جميع أزرار الثيمات
-            document.querySelectorAll('.theme-btn').forEach(btn => {
-                btn.classList.remove('active');
+        // تحديثات الوقت
+        function updateTimeAgo() {
+            document.querySelectorAll('.time-ago').forEach(el => {
+                // يمكن إضافة منطق حساب الوقت هنا
             });
-            
-            // تطبيق الثيم الجديد وإضافة الكلاس النشط
-            if (theme === 'white') {
-                document.body.classList.add('theme-white');
-                document.getElementById('themeWhite').classList.add('active');
-            } else {
-                document.getElementById('themeDark').classList.add('active');
-            }
-            
-            currentTheme = theme;
-            
-            // حفظ في التخزين المحلي
-            localStorage.setItem('mocat-theme', theme);
         }
         
-        // تغيير اللغة
-        function changeLanguage(lang) {
-            currentLanguage = lang;
-            
-            // تغيير اتجاه الصفحة
-            if (lang === 'en') {
-                document.documentElement.dir = 'ltr';
-                document.documentElement.lang = 'en';
-                document.body.style.textAlign = 'left';
-            } else {
-                document.documentElement.dir = 'rtl';
-                document.documentElement.lang = 'ar';
-                document.body.style.textAlign = 'right';
-            }
-            
-            // تحديث حالة الأزرار النشطة
-            document.querySelectorAll('.lang-btn').forEach(btn => {
-                btn.classList.remove('active');
-            });
-            document.getElementById('lang' + (lang === 'en' ? 'En' : 'Ar')).classList.add('active');
-            
-            // تحديث النصوص
-            updateTexts(lang);
-            
-            // حفظ في التخزين المحلي
-            localStorage.setItem('mocat-language', lang);
-        }
-        
-        // تحديث النصوص
-        function updateTexts(lang) {
-            const texts = lang === 'en' ? englishTexts : arabicTexts;
-            
-            // تحديث كل النصوص
-            for (const [key, value] of Object.entries(texts)) {
-                const element = document.getElementById(key);
-                if (element) {
-                    element.textContent = value;
-                }
-            }
-        }
-        
-        // تحميل التطبيق
-        function downloadApp() {
-            window.open('https://example.com/download/mocat', '_blank');
-        }
-        
-        // عند التحميل
-        document.addEventListener('DOMContentLoaded', function() {
-            // تحميل التفضيلات المحفوظة
-            const savedTheme = localStorage.getItem('mocat-theme');
-            const savedLanguage = localStorage.getItem('mocat-language');
-            
-            // تطبيق المظهر
-            if (savedTheme) {
-                changeTheme(savedTheme);
-            } else {
-                // الافتراضي: داكن
-                changeTheme('dark');
-            }
-            
-            // تطبيق اللغة
-            if (savedLanguage) {
-                changeLanguage(savedLanguage);
-            } else {
-                // الافتراضي: عربي
-                changeLanguage('ar');
-            }
-            
-            // إغلاق الإعدادات بالضغط خارجها
-            window.addEventListener('click', function(event) {
-                const modal = document.getElementById('settingsModal');
-                if (event.target === modal) {
-                    closeSettings();
-                }
-            });
-            
-            // إغلاق بالزر ESC
-            document.addEventListener('keydown', function(event) {
-                if (event.key === 'Escape') {
-                    closeSettings();
-                }
-            });
-            
-            // تفعيل الانيميشن عند التمرير
-            const sections = document.querySelectorAll('.section');
-            const featureCards = document.querySelectorAll('.feature-card');
-            const developerCards = document.querySelectorAll('.developer-card');
-            const faqItems = document.querySelectorAll('.faq-item');
-            
-            function checkScroll() {
-                sections.forEach(section => {
-                    const sectionTop = section.getBoundingClientRect().top;
-                    if (sectionTop < window.innerHeight - 100) {
-                        section.style.animationPlayState = 'running';
-                    }
-                });
-                
-                featureCards.forEach(card => {
-                    const cardTop = card.getBoundingClientRect().top;
-                    if (cardTop < window.innerHeight - 100) {
-                        card.style.animationPlayState = 'running';
-                    }
-                });
-                
-                developerCards.forEach(card => {
-                    const cardTop = card.getBoundingClientRect().top;
-                    if (cardTop < window.innerHeight - 100) {
-                        card.style.animationPlayState = 'running';
-                    }
-                });
-                
-                faqItems.forEach(item => {
-                    const itemTop = item.getBoundingClientRect().top;
-                    if (itemTop < window.innerHeight - 100) {
-                        item.style.animationPlayState = 'running';
-                    }
-                });
-            }
-            
-            window.addEventListener('scroll', checkScroll);
-            checkScroll(); // تشغيل فور التحميل
-            
-            console.log('موقع Mocat يعمل بنجاح');
+        // Socket Events
+        socket.on('new_file', function(file) {
+            addFileToUI(file);
         });
+        
+        socket.on('file_updated', function(file) {
+            updateFileUI(file);
+        });
+        
+        socket.on('new_message', function(message) {
+            addMessageToUI(message);
+        });
+        
+        socket.on('new_comment', function(data) {
+            // يمكن إضافة تحديث التعليقات هنا
+            console.log('تعليق جديد:', data);
+        });
+        
+        socket.on('connected', function(data) {
+            console.log('Connected to server');
+        });
+        
+        // إضافة ملف جديد للواجهة
+        function addFileToUI(file) {
+            const filesList = document.getElementById('filesList');
+            const loading = document.getElementById('loading');
+            
+            if (loading.style.display !== 'none') {
+                loading.style.display = 'none';
+            }
+            
+            const fileCard = document.createElement('div');
+            fileCard.className = 'file-card';
+            fileCard.id = 'file-' + file.id;
+            fileCard.innerHTML = `
+                <div class="file-header">
+                    <div class="user-info">
+                        <div class="user-avatar" style="background-color: ${file.color};">
+                            ${file.avatar}
+                        </div>
+                        <div>
+                            <div class="user-name">${file.username}</div>
+                            <div class="time-ago">${file.time_ago}</div>
+                        </div>
+                    </div>
+                    <div class="file-size">${(file.size / 1024 / 1024).toFixed(2)} MB</div>
+                </div>
+                
+                <div class="file-name">
+                    <span class="file-icon">${file.icon}</span>
+                    <span>${file.filename}</span>
+                </div>
+                
+                <div class="file-actions">
+                    <button class="btn btn-download" onclick="downloadFile('${file.id}', '${file.filename}')">
+                        <i class="fas fa-download"></i> تنزيل (0)
+                    </button>
+                    <button class="btn btn-comments" onclick="showComments('${file.id}')">
+                        <i class="fas fa-comment"></i> تعليقات (0)
+                    </button>
+                    <button class="btn btn-description" onclick="toggleDescription('${file.id}')">
+                        <i class="fas fa-info-circle"></i> وصف
+                    </button>
+                </div>
+                
+                <div class="description-box" id="desc-${file.id}" style="display: none;">
+                    <p>${file.description}</p>
+                </div>
+            `;
+            
+            filesList.insertBefore(fileCard, filesList.firstChild);
+            
+            // رسالة نظام
+            showSystemMessage(`تم رفع ملف جديد: ${file.filename}`);
+        }
+        
+        // تحديث ملف في الواجهة
+        function updateFileUI(file) {
+            const fileCard = document.getElementById('file-' + file.id);
+            if (fileCard) {
+                const downloadBtn = fileCard.querySelector('.btn-download');
+                if (downloadBtn) {
+                    downloadBtn.innerHTML = `<i class="fas fa-download"></i> تنزيل (${file.downloads})`;
+                }
+                
+                const commentsBtn = fileCard.querySelector('.btn-comments');
+                if (commentsBtn) {
+                    commentsBtn.innerHTML = `<i class="fas fa-comment"></i> تعليقات (${file.comments.length})`;
+                }
+            }
+        }
+        
+        // إضافة رسالة للواجهة
+        function addMessageToUI(message) {
+            const chatMessages = document.getElementById('chatMessages');
+            const isCurrentUser = message.username === document.getElementById('username').value;
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${isCurrentUser ? 'sent' : 'received'}`;
+            messageDiv.innerHTML = `
+                <div class="message-header">
+                    <div class="user-avatar" style="width: 25px; height: 25px; font-size: 12px; background-color: ${message.color};">
+                        ${message.avatar}
+                    </div>
+                    <strong>${message.username}</strong>
+                    <span style="font-size: 0.8rem; opacity: 0.7;">${message.timestamp}</span>
+                </div>
+                <div>${message.message}</div>
+            `;
+            
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        // نافذة الرفع
+        let currentStep = 1;
+        let selectedFile = null;
+        
+        function showUploadModal() {
+            document.getElementById('uploadOverlay').style.display = 'flex';
+            resetUploadForm();
+        }
+        
+        function closeUploadModal() {
+            document.getElementById('uploadOverlay').style.display = 'none';
+            resetUploadForm();
+        }
+        
+        function resetUploadForm() {
+            currentStep = 1;
+            selectedFile = null;
+            document.getElementById('step1').className = 'step active';
+            document.getElementById('step2').className = 'step';
+            document.getElementById('step1Content').style.display = 'block';
+            document.getElementById('step2Content').style.display = 'none';
+            document.getElementById('step1Error').style.display = 'none';
+            document.getElementById('step2Error').style.display = 'none';
+            document.getElementById('successMessage').style.display = 'none';
+            document.getElementById('fileName').innerHTML = '';
+            document.getElementById('file').value = '';
+            document.getElementById('description').value = '';
+        }
+        
+        function updateFileName() {
+            const fileInput = document.getElementById('file');
+            const fileNameDiv = document.getElementById('fileName');
+            
+            if (fileInput.files.length > 0) {
+                selectedFile = fileInput.files[0];
+                fileNameDiv.innerHTML = `<i class="fas fa-check-circle" style="color: #2a9d8f;"></i> ${selectedFile.name} (${(selectedFile.size / 1024 / 1024).toFixed(2)} MB)`;
+            }
+        }
+        
+        function nextStep() {
+            const username = document.getElementById('username').value.trim();
+            const fileInput = document.getElementById('file');
+            const errorDiv = document.getElementById('step1Error');
+            
+            if (!username) {
+                errorDiv.textContent = 'الرجاء إدخال اسمك';
+                errorDiv.style.display = 'block';
+                return;
+            }
+            
+            if (!fileInput.files.length) {
+                errorDiv.textContent = 'الرجاء اختيار ملف';
+                errorDiv.style.display = 'block';
+                return;
+            }
+            
+            selectedFile = fileInput.files[0];
+            
+            // التحقق من الحجم
+            if (selectedFile.size > 50 * 1024 * 1024) {
+                errorDiv.textContent = 'حجم الملف يتجاوز 50MB';
+                errorDiv.style.display = 'block';
+                return;
+            }
+            
+            errorDiv.style.display = 'none';
+            
+            // الانتقال للخطوة 2
+            currentStep = 2;
+            document.getElementById('step1').className = 'step completed';
+            document.getElementById('step2').className = 'step active';
+            document.getElementById('step1Content').style.display = 'none';
+            document.getElementById('step2Content').style.display = 'block';
+            
+            // عرض ملخص الملف
+            document.getElementById('fileSummary').innerHTML = `
+                <div>الاسم: ${selectedFile.name}</div>
+                <div>الحجم: ${(selectedFile.size / 1024 / 1024).toFixed(2)} MB</div>
+                <div>المستخدم: ${username}</div>
+            `;
+        }
+        
+        function prevStep() {
+            currentStep = 1;
+            document.getElementById('step1').className = 'step active';
+            document.getElementById('step2').className = 'step';
+            document.getElementById('step1Content').style.display = 'block';
+            document.getElementById('step2Content').style.display = 'none';
+            document.getElementById('step2Error').style.display = 'none';
+        }
+        
+        function uploadFile() {
+            const username = document.getElementById('username').value.trim();
+            const description = document.getElementById('description').value.trim();
+            const errorDiv = document.getElementById('step2Error');
+            const successDiv = document.getElementById('successMessage');
+            const uploadBtn = document.getElementById('uploadBtn');
+            
+            // التحقق من الوصف
+            if (!description) {
+                errorDiv.textContent = 'الرجاء إدخال وصف للملف';
+                errorDiv.style.display = 'block';
+                return;
+            }
+            
+            // إرسال الملف
+            const formData = new FormData();
+            formData.append('username', username);
+            formData.append('description', description);
+            formData.append('file', selectedFile);
+            
+            uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> جاري الرفع...';
+            uploadBtn.disabled = true;
+            
+            fetch('/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    errorDiv.textContent = data.error;
+                    errorDiv.style.display = 'block';
+                    successDiv.style.display = 'none';
+                } else {
+                    errorDiv.style.display = 'none';
+                    successDiv.textContent = '✓ تم رفع الملف بنجاح!';
+                    successDiv.style.display = 'block';
+                    
+                    setTimeout(() => {
+                        closeUploadModal();
+                        successDiv.style.display = 'none';
+                    }, 2000);
+                }
+                uploadBtn.innerHTML = '<i class="fas fa-upload"></i> رفع الملف';
+                uploadBtn.disabled = false;
+            })
+            .catch(error => {
+                errorDiv.textContent = 'حدث خطأ أثناء الرفع';
+                errorDiv.style.display = 'block';
+                uploadBtn.innerHTML = '<i class="fas fa-upload"></i> رفع الملف';
+                uploadBtn.disabled = false;
+            });
+        }
+        
+        // نافذة المحادثة
+        function showChatModal() {
+            document.getElementById('chatOverlay').style.display = 'flex';
+            document.getElementById('chatInput').focus();
+        }
+        
+        function closeChatModal() {
+            document.getElementById('chatOverlay').style.display = 'none';
+        }
+        
+        function sendMessage() {
+            const input = document.getElementById('chatInput');
+            const username = document.getElementById('username').value.trim() || 'مستخدم';
+            const message = input.value.trim();
+            
+            if (!message) return;
+            
+            fetch('/api/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    username: username,
+                    message: message
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    input.value = '';
+                }
+            });
+        }
+        
+        // التنزيل والتعليقات
+        function downloadFile(fileId, filename) {
+            fetch(`/download/${fileId}`)
+                .then(response => {
+                    if (response.ok) {
+                        return response.blob();
+                    }
+                    throw new Error('فشل التنزيل');
+                })
+                .then(blob => {
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                    
+                    showSystemMessage(`تم تنزيل الملف: ${filename}`);
+                })
+                .catch(error => {
+                    alert('حدث خطأ أثناء التنزيل: ' + error.message);
+                });
+        }
+        
+        function toggleDescription(fileId) {
+            const desc = document.getElementById('desc-' + fileId);
+            if (desc.style.display === 'none' || desc.style.display === '') {
+                desc.style.display = 'block';
+            } else {
+                desc.style.display = 'none';
+            }
+        }
+        
+        function showComments(fileId) {
+            alert('ميزة التعليقات قيد التطوير. سيتم إضافتها قريبًا!');
+        }
+        
+        function showHome() {
+            // تحديث القائمة
+            window.location.reload();
+        }
+        
+        function showStats() {
+            const username = document.getElementById('username').value.trim() || 'مستخدم';
+            fetch(`/api/stats/${username}`)
+                .then(response => response.json())
+                .then(data => {
+                    alert(`إحصائيات ${username}:
+                    
+• الملفات المرفوعة: ${data.file_count}/${data.max_files}
+• المساحة المستخدمة: ${(data.total_size / 1024 / 1024).toFixed(2)}MB/${data.max_size / 1024 / 1024}MB
+• التعليقات المكتوبة: ${data.comments_count}
+                    
+يمكنك رفع ${data.max_files - data.file_count} ملفات أخرى.`);
+                });
+        }
+        
+        function showSystemMessage(message) {
+            const filesList = document.getElementById('filesList');
+            const systemMsg = document.createElement('div');
+            systemMsg.className = 'system-message';
+            systemMsg.innerHTML = `<i class="fas fa-info-circle"></i> ${message}`;
+            filesList.insertBefore(systemMsg, filesList.firstChild);
+            
+            setTimeout(() => {
+                systemMsg.remove();
+            }, 5000);
+        }
+        
+        // تحميل الملفات عند بدء التشغيل
+        window.onload = function() {
+            fetch('/api/files')
+                .then(response => response.json())
+                .then(files => {
+                    const loading = document.getElementById('loading');
+                    if (loading) loading.style.display = 'none';
+                });
+        };
     </script>
 </body>
 </html>
 '''
 
-@app.route('/')
-def home():
-    return render_template_string(HTML_TEMPLATE)
-
+# ============ تشغيل التطبيق ============
 if __name__ == '__main__':
-    print("🚀 تشغيل موقع Mocat...")
-    print("📍 افتح: http://localhost:5000")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    # إنشاء مجلد التحميل إذا لم يكن موجودًا
+    if not os.path.exists(app.config['UPLOAD_FOLDER']):
+        os.makedirs(app.config['UPLOAD_FOLDER'])
+        print(f"تم إنشاء مجلد '{app.config['UPLOAD_FOLDER']}'")
+    
+    print("\n" + "="*50)
+    print("🚀 تطبيق مشاركة الملفات يعمل!")
+    print("="*50)
+    print(f"🌐 افتح المتصفح واذهب إلى: http://localhost:5000")
+    print(f"📁 مجلد التحميل: {app.config['UPLOAD_FOLDER']}")
+    print(f"⚡ SocketIO يعمل على نفس المنفذ")
+    print("="*50 + "\n")
+    
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
